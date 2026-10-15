@@ -10,14 +10,17 @@
 #
 # WHICH MARKETS to trade is NOT in this file — you state it explicitly on
 # every start with command-line flags:
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy is always one leg; --hedge picks the other:
+#     python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
+# --primary selects the primary (default light-rh / RH); --hedge picks the other:
 #   lighter      Lighter mainnet            (USDC, 0 bps taker)
 #   lighter-rh   Lighter Robinhood chain    (USDG, 0 bps taker)
 #   tradexyz     Hyperliquid trade.xyz dex  (USDC, ~1 bps taker)
 # 交易哪个市场不在本文件中配置——每次启动时用命令行参数显式指定：
-#     python3 main.py --symbol SNDK --hedge lighter-rh
-# Entropy 永远是其中一条腿；--hedge 选择对冲腿（三选一，见上表）。
+#     python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
+# --primary 选择主腿（默认 light-rh / RH）；--hedge 选择对冲腿（默认 lighter）。
+# 默认组合 / default pair: python3 main.py --symbol LIT
+# 原 Entropy 组合 / legacy pair: --primary entropy --hedge lighter-rh
+# 下文的 Entropy 信号公式均按所选主腿计算；更换组合后需重新采集和设定阈值。
 
 # ============================ THE SIGNAL / 信号 ============================
 # premium_bps = (Entropy price / hedge price - 1) * 10000
@@ -41,6 +44,14 @@ thresholds:
   lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
 
 # ======================== VENUES / 交易所参数 ==============================
+# Optional overrides for the selected primary venue. When --primary entropy,
+# these override the legacy entropy section; otherwise entropy is ignored.
+# 可选主腿参数；选 entropy 时覆盖下方旧配置，其他主腿不使用 entropy 段。
+# primary:
+#   taker_fee_bps: 0.0
+#   max_position_usd: 1000
+#   max_orders_per_min: 30
+
 entropy:
   dex: io                    # Entropy's dex name on Hyperliquid / Entropy 的 dex 名
   taker_fee_bps: 0.0         # taker fee / 吃单手续费

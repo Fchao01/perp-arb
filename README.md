@@ -2,8 +2,10 @@
 
 **[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
 
-Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
-(the `io` builder dex on Hyperliquid); the other leg — the hedge — is one of:
+Open-source two-venue perp arbitrage bot. Select the primary with `--primary`
+(default `light-rh` / `lighter-rh`, **RH**), or choose `lighter`, `entropy`
+(the `io` dex on Hyperliquid), or `tradexyz`. Select the other leg with
+`--hedge` (default **Lighter mainnet**):
 
 | `--hedge` | venue | quote | taker fee | protocol |
 |---|---|---|---|---|
@@ -76,10 +78,12 @@ cp config.example.yaml config.yaml       # the strategy (thresholds, sizing, ris
 cp .env.example .env                     # credentials — required to trade
 ```
 
-The markets are **not** in the config file — you state them explicitly on
-every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
-other leg).
+`--symbol` is required. `--primary` overrides `.env`'s `PRIMARY_VENUE`
+(default `light-rh` / RH); `--hedge` defaults to `lighter`. Both legs must be
+different markets. For the default pair use `python3 main.py --record-only --symbol LIT`.
+For the original pair add `--primary entropy --hedge lighter-rh`.
+Re-record data and recalibrate thresholds when changing pairs. The signal
+examples use Entropy; at runtime this refers to the selected primary.
 
 There is **no paper mode** — the bot either collects data (`--record-only`)
 or trades live. Validate with recorded data and tiny position caps, not with
@@ -88,7 +92,7 @@ simulated fills.
 **1. Collect data first** (no credentials needed):
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
@@ -108,7 +112,7 @@ the smallest position caps that clear the venue minimums:
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 Running without `--record-only` sends real orders immediately once both
@@ -149,7 +153,8 @@ recent data; premiums drift, so re-run it regularly and update
 
 Strategy lives in `config.yaml` (validated — unknown keys are startup
 errors), credentials in `.env`, and the markets on the command line
-(`--symbol`, `--hedge`). Full commented reference:
+(`--symbol`, `--primary`, `--hedge`). The optional `primary:` section configures
+the selected primary; for Entropy it overrides legacy `entropy:` settings. Full commented reference:
 [config.example.yaml](config.example.yaml). The essentials:
 
 | key | meaning | default |
@@ -176,10 +181,36 @@ errors), credentials in `.env`, and the markets on the command line
   both legs share this account by default (one nonce sequence is handled
   internally); set `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`
   to split them. Fund the dex-specific clearinghouses you trade.
-- **Lighter** — `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`,
-  `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
-  `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
-  keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
+- **Lighter** — `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`, and
+  `LIGHTER_API_PRIVATE_KEY` are mainnet credentials. RH uses separate
+  `LIGHTER_RH_ACCOUNT_INDEX`, `LIGHTER_RH_API_KEY_INDEX`, and
+  `LIGHTER_RH_API_PRIVATE_KEY`. The default pair needs both sets. A legacy
+  single-RH pair can still use `LIGHTER_*`; the two-chain pair never shares
+  those keys. See [lighter-python](https://github.com/elliottech/lighter-python).
+
+## Telegram trade notifications
+
+Set both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to enable Chinese
+trade notices; leave both empty to disable. Start the bot in a private chat or
+add it to the target group first. Notices use the
+[Telegram sendMessage API](https://core.telegram.org/bots/api#sendmessage).
+
+Each pair execution with a fill or an unresolved result queues the requested
+trade template: status, `sell_primary` / `buy_primary`, leg fills, planned size,
+both-leg notional, trade and cumulative profit, hedge count, balances, equity,
+and account equity change. Partial/failed/unresolved executions are labeled
+accordingly; unknown values show `—`. Sending runs in the background and failures
+only log a warning. Shutdown allows up to 10 seconds to drain the queue. Failed
+sends are not retried; network failures or a forced exit can lose notices.
+
+Accounting is unchanged: profit uses matched-fill price edge less configured
+fees (`fill_edge`), excluding funding, unmatched inventory PnL, and corrective
+hedge costs. Totals are per process session. Existing cumulative volume can use
+planned limit prices if fill prices are unavailable; unknown current-trade
+values are shown as unavailable. Balances/account change use the existing
+30-second balance snapshots; hedge count is the existing corrective attempt count.
+Legacy CSV columns and internal `sell_entropy` / `buy_entropy` keys still refer
+to the selected primary. Strategy, sizing and risk rules are unchanged.
 
 ## How execution works
 

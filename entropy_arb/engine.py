@@ -1,4 +1,6 @@
-"""Two-venue arbitrage engine: Entropy vs one hedge venue.
+"""Two-venue arbitrage engine with a selectable primary and hedge venue.
+
+The legacy internal "entropy" slot below represents the selected primary.
 
 The signal is a fixed band around a configured midline (config.yaml):
 
@@ -27,6 +29,7 @@ import aiohttp
 from .book import ArbPlan, floor_step, plan_arb
 from .config import Config
 from .recorder import MinuteRecorder
+from .telegram import TelegramNotifier, trade_message
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
 
@@ -85,6 +88,7 @@ class Engine:
         self._venue_fetch_fails: Dict[str, int] = {}
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
+        self.telegram = TelegramNotifier(cfg.telegram)
 
     # ------------------------------------------------------------- utilities
 
@@ -125,10 +129,15 @@ class Engine:
         # keepalive loop pings inside this window to hold them open.
         self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
             keepalive_timeout=75.0, ttl_dns_cache=300))
+        if not self.record_only:
+            self.telegram.start(self.session)
         try:
             await self._run_inner()
         finally:
-            await self.session.close()
+            try:
+                await self.telegram.close()
+            finally:
+                await self.session.close()
 
     def _make_venue(self, vc):
         if vc.kind == "lighter":
@@ -154,9 +163,9 @@ class Engine:
                     "请用 --record-only")
             self.entropy.init_signer()
             self.hedge.init_signer()
-            if self.hedge.kind == "hl":
+            if self.entropy.kind == self.hedge.kind == "hl":
                 self.entropy.share_nonces_with(self.hedge)
-        if (self.hedge.kind == "hl"
+        if (self.entropy.kind == self.hedge.kind == "hl"
                 and self.entropy._query_address()
                 and self.entropy._query_address() == self.hedge._query_address()):
             self.hedge.include_core_equity = False  # shared account: count once
@@ -167,9 +176,9 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair ENTROPY(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
+        log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
-                 self.entropy.conf.symbol, self.hedge.name,
+                 self.entropy.name, self.entropy.conf.symbol, self.hedge.name,
                  self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
                  cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
@@ -495,7 +504,39 @@ class Engine:
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps)
         self.last_trade_ts = time.time()
+        if self.cfg.telegram.enabled and (bfill or sfill or unresolved):
+            self._notify_trade(buy, sell, plan, binfo, sinfo, fill_edge,
+                               bool(unresolved), hard_err)
         return bool(unresolved)
+
+    def _notify_trade(self, buy, sell, plan, binfo, sinfo, fill_edge,
+                      unresolved, hard_err) -> None:
+        """Snapshot existing accounting; never await a network request here."""
+        try:
+            bfill, sfill = binfo["filled_base"], sinfo["filled_base"]
+            known_prices = (not bfill or binfo.get("avg_px")) and (
+                not sfill or sinfo.get("avg_px"))
+            notional = (bfill * (binfo.get("avg_px") or 0.0)
+                        + sfill * (sinfo.get("avg_px") or 0.0)
+                        ) if known_prices and not unresolved else None
+            complete = (not unresolved and not hard_err
+                        and bfill >= plan.qty - 1e-9 and sfill >= plan.qty - 1e-9)
+            state = ("待确认" if unresolved else "异常" if hard_err else
+                     "完成" if complete else "部分成交")
+            self.telegram.enqueue(trade_message(
+                symbol=self.cfg.symbol,
+                direction="sell_primary" if sell.key == "entropy" else "buy_primary",
+                state=state, buy_name=buy.name, sell_name=sell.name,
+                buy_status=binfo["status"], sell_status=sinfo["status"],
+                buy_fill=bfill, sell_fill=sfill, qty=plan.qty,
+                notional=notional,
+                profit=fill_edge if known_prices and not unresolved else None,
+                total_notional=sum(v.volume_usd for v in self.venues.values()),
+                total_profit=self.total_fill_edge, hedges=self.hedges,
+                balances=[(v.name, v.free, v.equity) for v in self.venues.values()],
+                account_delta=self.account_delta()))
+        except Exception:
+            log.exception("could not build Telegram trade notification")
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
                       status: str, ok: bool) -> None:

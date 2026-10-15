@@ -2,8 +2,9 @@
 
 **[English documentation / 英文文档 → README.md](README.md)**
 
-开源双交易所永续合约套利机器人。其中一条腿永远是 **Entropy**（Hyperliquid 上的
-`io` builder dex）；另一条腿（对冲腿）三选一：
+开源双交易所永续合约套利机器人。主腿通过 `--primary` 选择，默认 **RH**
+（`light-rh` / `lighter-rh`）；也可选 `lighter`、`entropy`（Hyperliquid 的
+`io` dex）或 `tradexyz`。对冲腿通过 `--hedge` 选择，默认 **LIGHTER 主网**：
 
 | `--hedge` | 交易所 | 计价货币 | 吃单费 | 协议 |
 |---|---|---|---|---|
@@ -69,10 +70,18 @@ cp config.example.yaml config.yaml       # 策略配置（阈值、规模、风�
 cp .env.example .env                     # 密钥——交易必填
 ```
 
-交易哪个市场**不在**配置文件中——每次启动时用命令行参数显式指定：
-`--symbol`（两个交易所共同交易的品种）和 `--hedge`（三选一：
-`lighter`、`lighter-rh`、`tradexyz`；Entropy 永远是
-另一条腿）。
+`--symbol` 必填；主腿默认读取 `.env` 中的 `PRIMARY_VENUE=light-rh`，
+命令行 `--primary` 优先；`--hedge` 默认 `lighter`。两条腿不能选同一市场。
+
+```bash
+# 默认 RH 主腿 + LIGHTER 主网对冲腿
+python3 main.py --record-only --symbol LIT
+# 原 Entropy + RH 组合需显式指定主腿
+python3 main.py --record-only --symbol SNDK --primary entropy --hedge lighter-rh
+```
+
+更换交易组合后，需要重新采集数据并设定溢价中枢，不能直接沿用旧组合的阈值。
+文档沿用 Entropy 作为信号示例；运行时公式中的 Entropy 实际指所选主腿。
 
 本机器人**没有模拟盘**——要么采集数据（`--record-only`），要么实盘交易。
 请用采集的数据和最小的仓位上限来验证策略，而不是模拟成交。
@@ -80,7 +89,7 @@ cp .env.example .env                     # 密钥——交易必填
 **第一步：先采集数据**（不需要任何密钥）：
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
@@ -100,7 +109,7 @@ python3 tools/analyze.py
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 不带 `--record-only` 运行时，只要两边行情就绪且溢价越过带宽，就会立即
@@ -136,7 +145,8 @@ python3 main.py --symbol SNDK --hedge lighter-rh
 ## 配置说明
 
 策略在 `config.yaml`（严格校验——未知键名直接报错），密钥在 `.env`。
-交易市场由命令行指定（`--symbol`、`--hedge`）。完整的双语注释参考：
+交易市场由 `--symbol`、`--primary`、`--hedge` 指定。主腿参数可放在
+`primary:` 段；选择 Entropy 时兼容 `entropy:` 段，`primary:` 同名项优先。完整的双语注释参考：
 [config.example.yaml](config.example.yaml)。核心项：
 
 | 键 | 含义 | 默认值 |
@@ -164,9 +174,29 @@ python3 main.py --symbol SNDK --hedge lighter-rh
   如需分开，设置 `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`。注意给
   所交易的各 dex 分别充入保证金。
 - **Lighter** —— `LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`、
-  `LIGHTER_API_PRIVATE_KEY`，必须注册在与启动参数 `--hedge` **相同的部署**上
-  （主网与 Robinhood 链是两套独立的账户和密钥——参见
+  `LIGHTER_API_PRIVATE_KEY` 用于主网；RH 使用独立的 `LIGHTER_RH_ACCOUNT_INDEX`、
+  `LIGHTER_RH_API_KEY_INDEX`、`LIGHTER_RH_API_PRIVATE_KEY`。默认组合必须填写两组。
+  原先只有 RH 一条 Lighter 腿时仍兼容旧 `LIGHTER_*` 配置；主网与 RH 同时使用时
+  不会共用密钥（参见
   [lighter-python](https://github.com/elliottech/lighter-python)）。
+
+## Telegram 成交通知
+
+在 `.env` 同时填写 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 后启用；两项留空则关闭。
+先在 Telegram 私聊启动 bot，或把 bot 加入目标群。通知使用
+[Telegram sendMessage API](https://core.telegram.org/bots/api#sendmessage)。
+
+每次双腿执行有成交或结果待确认时，按中文模板推送品种、状态、`sell_primary` / `buy_primary`、
+买卖交易所及成交量、计划数量、双边成交额、本次和累计盈利、对冲笔数、两所可用余额与权益、
+账户权益变化。部分成交、异常和待确认不会显示为“完成”；未知数据显示 `—`。
+通知在后台异步发送，失败只记日志，不影响下单和补对冲；退出时最多等待 10 秒发送队列。
+发送失败不自动重试，断网或进程被强制结束时可能丢失通知。
+
+统计沿用现有引擎：盈利是两腿**匹配成交量的价差减配置手续费**（`fill_edge`），
+不包含资金费、未匹配敞口的盈亏或补对冲成本；累计值从本次启动开始计算。
+成交价未知时现有累计成交额仍可能按计划限价估算；当前通知不会把未知的本次金额、盈利填成零。
+余额及账户权益变化使用现有每 30 秒轮询的最新快照，并非逐笔刷新；对冲笔数沿用已有补对冲尝试计数。
+原 CSV 列名及内部 `sell_entropy` / `buy_entropy` 标识保留兼容，现在对应所选主腿。
 
 ## 执行机制
 

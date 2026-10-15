@@ -1,11 +1,12 @@
 """Configuration: strategy from a YAML file, credentials from .env, market
-selection (symbol + hedge venue) from the command line.
+selection (symbol + primary/hedge venues) from the command line.
 
 The split is deliberate: config.yaml IS the strategy (thresholds, sizing,
-risk) and is safe to share/commit as an example; .env holds only secrets;
-which markets to trade is stated explicitly on every start (--symbol,
---hedge). Every YAML key is validated against the schema below, so a typo
-is an error rather than a setting that silently does nothing.
+risk) and is safe to share/commit as an example; .env holds credentials,
+Telegram settings and the default PRIMARY_VENUE. --primary overrides that
+default (RH); --hedge defaults to Lighter mainnet. --symbol is required.
+Every YAML key is validated against the schema below, so a typo is an error
+rather than a setting that silently does nothing.
 
 Threshold model (fixed numbers the user derives from recorded minute data):
 
@@ -22,7 +23,7 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import yaml
@@ -32,6 +33,7 @@ HL_API_URL = "https://api.hyperliquid.xyz"
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed used
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
+PRIMARY_VENUES = ("light-rh", "lighter-rh", "lighter", "entropy", "tradexyz")
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,16 @@ class VenueConf:
 
 
 @dataclass
+class TelegramConf:
+    bot_token: Optional[str] = field(default=None, repr=False)
+    chat_id: Optional[str] = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+
+@dataclass
 class Config:
     symbol: str
     hedge_venue: str
@@ -136,6 +148,8 @@ class Config:
     # runtime
     hl_api_url: str = HL_API_URL
     hl_ws_url: str = HL_WS_URL
+    primary_venue: str = "lighter-rh"
+    telegram: TelegramConf = field(default_factory=TelegramConf)
 
     @property
     def creds_complete(self) -> bool:
@@ -158,6 +172,12 @@ _SCHEMA: Dict[str, Any] = {
         "lower_bps": float,
     },
     "entropy": {
+        "dex": str,
+        "taker_fee_bps": float,
+        "max_position_usd": float,
+        "max_orders_per_min": int,
+    },
+    "primary": {
         "dex": str,
         "taker_fee_bps": float,
         "max_position_usd": float,
@@ -253,7 +273,8 @@ def _env_i(name: str) -> Optional[int]:
 # -------------------------------------------------------------------- loading
 
 def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
-                symbol: str, hedge_venue: str) -> Config:
+                symbol: str, hedge_venue: str = "lighter",
+                primary_venue: Optional[str] = None) -> Config:
     load_dotenv(env_file)
     try:
         with open(config_file) as fh:
@@ -269,6 +290,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if not symbol:
         raise ConfigError("--symbol is required, e.g. --symbol SNDK / "
                           "必须用 --symbol 指定交易品种")
+    primary_venue = primary_venue or _env_s("PRIMARY_VENUE") or "light-rh"
+    if primary_venue not in PRIMARY_VENUES:
+        raise ConfigError(f"--primary / PRIMARY_VENUE must be one of {list(PRIMARY_VENUES)}")
+    if primary_venue == "light-rh":
+        primary_venue = "lighter-rh"
     if hedge_venue not in HEDGE_VENUES:
         raise ConfigError(
             f"--hedge must be one of {list(HEDGE_VENUES)}, got "
@@ -291,54 +317,62 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
-    entropy_dex = _get(raw, "entropy", "dex", "io")
-    if hedge_venue == "tradexyz" and entropy_dex == "xyz":
-        raise ConfigError("entropy.dex 'xyz' with hedge_venue 'tradexyz' is "
-                          "the same market on both legs / 两条腿是同一个市场")
+    # Keep the internal "entropy" slot and signal keys for compatibility;
+    # it now holds whichever primary venue is selected.
+    primary_settings = dict(raw.get("entropy") or {}) if primary_venue == "entropy" else {}
+    primary_settings.update(raw.get("primary") or {})
 
-    entropy_hl_creds = HLCreds(_env_s("HL_PRIVATE_KEY"),
-                               _env_s("HL_ACCOUNT_ADDRESS"))
-    entropy = VenueConf(
-        key="entropy", kind="hl", label="ENTROPY",
-        symbol=symbol,
-        fee_bps=float(_get(raw, "entropy", "taker_fee_bps", 0.0)),
-        cap_usd=float(_get(raw, "entropy", "max_position_usd", 1000.0)),
-        orders_per_min=int(_get(raw, "entropy", "max_orders_per_min", 120)),
-        hl_dex=entropy_dex,
-        hl_creds=entropy_hl_creds,
-    )
+    def make_venue(name: str, key: str, settings: dict) -> VenueConf:
+        is_lighter = name in LIGHTER_PROFILES
+        conf = VenueConf(
+            key=key, kind="lighter" if is_lighter else "hl",
+            label={"entropy": "ENTROPY", "tradexyz": "XYZ",
+                   "lighter": "LIGHTER", "lighter-rh": "RH"}[name],
+            symbol=symbol,
+            fee_bps=float(settings.get("taker_fee_bps", 1.0 if name == "tradexyz" else 0.0)),
+            cap_usd=float(settings.get("max_position_usd", 1000.0)),
+            orders_per_min=int(settings.get("max_orders_per_min", 30 if is_lighter else 120)),
+        )
+        if is_lighter:
+            conf.lighter_profile = LIGHTER_PROFILES[name]
+            # RH has separate credentials. Legacy LIGHTER_* fallback remains
+            # valid for a single Lighter deployment, never for a two-chain pair.
+            prefix = "LIGHTER"
+            if name == "lighter-rh":
+                rh_configured = any(_env_s("LIGHTER_RH_" + suffix) for suffix in
+                                    ("ACCOUNT_INDEX", "API_KEY_INDEX", "API_PRIVATE_KEY"))
+                if rh_configured or "lighter" in (primary_venue, hedge_venue):
+                    prefix = "LIGHTER_RH"
+            conf.lighter_creds = LighterCreds(
+                _env_i(prefix + "_ACCOUNT_INDEX"), _env_i(prefix + "_API_KEY_INDEX"),
+                _env_s(prefix + "_API_PRIVATE_KEY"))
+        else:
+            conf.hl_dex = settings.get("dex", "io") if name == "entropy" else "xyz"
+            conf.hl_creds = HLCreds(
+                (_env_s("HL_PRIVATE_KEY_XYZ") if name == "tradexyz" else None)
+                or _env_s("HL_PRIVATE_KEY"),
+                (_env_s("HL_ACCOUNT_ADDRESS_XYZ") if name == "tradexyz" else None)
+                or _env_s("HL_ACCOUNT_ADDRESS"))
+        return conf
 
-    if hedge_venue == "tradexyz":
-        hedge = VenueConf(
-            key="hedge", kind="hl", label="XYZ",
-            symbol=symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 1.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 120)),
-            hl_dex="xyz",
-            hl_creds=HLCreds(
-                _env_s("HL_PRIVATE_KEY_XYZ") or _env_s("HL_PRIVATE_KEY"),
-                _env_s("HL_ACCOUNT_ADDRESS_XYZ") or _env_s("HL_ACCOUNT_ADDRESS")),
-        )
-    else:
-        hedge = VenueConf(
-            key="hedge", kind="lighter",
-            label="LIGHTER" if hedge_venue == "lighter" else "RH",
-            symbol=symbol,
-            fee_bps=float(_get(raw, "hedge", "taker_fee_bps", 0.0)),
-            cap_usd=float(_get(raw, "hedge", "max_position_usd", 1000.0)),
-            orders_per_min=int(_get(raw, "hedge", "max_orders_per_min", 30)),
-            lighter_profile=LIGHTER_PROFILES[hedge_venue],
-            lighter_creds=LighterCreds(_env_i("LIGHTER_ACCOUNT_INDEX"),
-                                       _env_i("LIGHTER_API_KEY_INDEX"),
-                                       _env_s("LIGHTER_API_PRIVATE_KEY")),
-        )
+    entropy = make_venue(primary_venue, "entropy", primary_settings)
+    hedge = make_venue(hedge_venue, "hedge", raw.get("hedge") or {})
+    if (primary_venue == hedge_venue or
+            (entropy.kind == hedge.kind == "hl" and entropy.hl_dex == hedge.hl_dex)):
+        raise ConfigError("the same market on both legs / 两条腿是同一个市场")
+
+    telegram = TelegramConf(_env_s("TELEGRAM_BOT_TOKEN"), _env_s("TELEGRAM_CHAT_ID"))
+    if bool(telegram.bot_token) != bool(telegram.chat_id):
+        raise ConfigError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set together / "
+                          "Telegram 的 token 和 chat_id 必须同时填写")
 
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
         entropy=entropy,
         hedge=hedge,
+        primary_venue=primary_venue,
+        telegram=telegram,
         midline_bps=float(thr["midline_bps"]),
         upper_bps=upper,
         lower_bps=lower,

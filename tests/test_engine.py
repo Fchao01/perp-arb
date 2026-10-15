@@ -28,7 +28,7 @@ execution:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="lighter-rh", primary_venue="entropy")
 
 
 class StubVenue:

@@ -32,12 +32,12 @@ thresholds:
 
 def load(yaml_text: str, symbol="SNDK", hedge="lighter-rh"):
     return load_config(write_tmp(yaml_text), NO_ENV,
-                       symbol=symbol, hedge_venue=hedge)
+                       symbol=symbol, hedge_venue=hedge, primary_venue="entropy")
 
 
 def test_example_config_loads():
     cfg = load_config(EXAMPLE, NO_ENV,
-                      symbol="SNDK", hedge_venue="lighter-rh")
+                      symbol="SNDK", hedge_venue="lighter-rh", primary_venue="entropy")
     assert cfg.symbol == "SNDK"
     assert cfg.entropy.kind == "hl" and cfg.entropy.hl_dex == "io"
     assert cfg.hedge_venue == "lighter-rh"

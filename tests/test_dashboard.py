@@ -29,7 +29,7 @@ thresholds:
 """)
     f.close()
     return load_config(f.name, NO_ENV,
-                       symbol="SNDK", hedge_venue="lighter-rh")
+                       symbol="SNDK", hedge_venue="lighter-rh", primary_venue="entropy")
 
 
 class StubVenue:
@@ -50,7 +50,8 @@ class StubVenue:
 
 def render(eng, lang="en") -> str:
     dash = Dashboard(eng, BufferLogHandler(), "logs/engine.log", lang=lang)
-    console = Console(record=True, width=120, force_terminal=True)
+    # TERM=dumb otherwise ignores width unless height is also explicit.
+    console = Console(record=True, width=120, height=40, force_terminal=True)
     console.print(dash._safe_render())
     return console.export_text()
 
@@ -68,6 +69,17 @@ def test_renders_before_markets_resolve():
     eng = Engine(make_cfg())
     out = render(eng)
     assert "resolving markets" in out
+
+
+def test_renders_selected_primary_name():
+    eng = make_engine()
+    eng.entropy.name, eng.hedge.name = "RH", "LIGHTER"
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    out = render(eng)
+    assert "SNDK × RH · LIGHTER" in out
+    assert "SELL RH → buy LIGHTER" in out
+    assert "BUY RH → sell LIGHTER" in out
 
 
 def test_renders_key_numbers():
