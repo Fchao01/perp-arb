@@ -63,6 +63,39 @@ def test_tradexyz_hedge():
     assert cfg.hedge.label == "XYZ"
 
 
+def test_log_paths_are_separate_for_each_symbol():
+    for symbol in ("LIT", "BTC", "ETH"):
+        cfg = load(MINIMAL, symbol=symbol)
+        assert cfg.recorder_csv == f"logs/minutes_{symbol}.csv"
+        assert cfg.trades_csv == f"logs/trades_{symbol}.csv"
+        assert cfg.log_file == f"logs/engine_{symbol}.log"
+
+
+def test_log_templates_and_legacy_fixed_paths():
+    cfg = load(MINIMAL + '''
+recorder:
+  csv: "data/{symbol}/minutes.csv"
+logging:
+  trades_csv: "custom/trades.csv"
+  file: "custom/engine.log"
+''', symbol="LIT")
+    assert cfg.recorder_csv == "data/LIT/minutes.csv"
+    assert cfg.trades_csv == "custom/trades_LIT.csv"
+    assert cfg.log_file == "custom/engine_LIT.log"
+    # Empty file continues to select console logging.
+    assert load(MINIMAL + '\nlogging:\n  file: ""\n').log_file == ""
+
+
+def test_symbol_cannot_escape_log_directory_or_collide_with_encoded_name():
+    cfg = load(MINIMAL + '\nrecorder:\n  csv: "logs/{symbol}/minutes.csv"\n',
+               symbol="../BTC/USD")
+    assert cfg.recorder_csv == "logs/..%2FBTC%2FUSD/minutes.csv"
+    assert cfg.trades_csv == "logs/trades_..%2FBTC%2FUSD.csv"
+    assert load(MINIMAL, symbol="BTC/USD").trades_csv != load(
+        MINIMAL, symbol="BTC%2FUSD").trades_csv
+    assert load(MINIMAL, symbol="..").trades_csv == "logs/trades_%2E%2E.csv"
+
+
 def expect_error(yaml_text: str, needle: str, **kw):
     try:
         load(yaml_text, **kw)

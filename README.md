@@ -96,12 +96,12 @@ python3 main.py --record-only --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+intraday regimes). It writes `logs/minutes_{symbol}.csv`.
 
 **2. Analyze and set your thresholds:**
 
 ```bash
-python3 tools/analyze.py
+python3 tools/analyze.py --csv logs/minutes_SNDK.csv
 ```
 
 It prints the premium distribution, how often each candidate band would have
@@ -123,7 +123,7 @@ books with age/spread, positions and caps, equity and session PnL, the
 executable premium of each direction against its full hurdle (fees and
 inventory surcharge included, ● = armed), recorder progress, the last
 executions, and a tail of the log (the full log goes to `logging.file`,
-default `logs/engine.log`). It works in `--record-only` too. Add `--cn` to
+default `logs/engine_{symbol}.log`). It works in `--record-only` too. Add `--cn` to
 display the dashboard in Chinese. Use `--no-dashboard` for plain console
 logs (nohup/systemd — off-terminal runs fall back automatically), or set
 `logging.dashboard: false`.
@@ -170,8 +170,18 @@ the selected primary; for Entropy it overrides legacy `entropy:` settings. Full 
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
+| `recorder.*` | minute-data recorder | on, `logs/minutes_{symbol}.csv` |
+| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine_{symbol}.log` |
+
+Log files are separated by `--symbol`: LIT writes `logs/minutes_LIT.csv`,
+`logs/trades_LIT.csv`, and `logs/engine_LIT.log`; BTC writes separate BTC files.
+Restarting the same symbol appends to its files. Use `{symbol}` in `recorder.csv`,
+`logging.trades_csv`, or `logging.file` for custom paths such as
+`logs/{symbol}/trades.csv`. Legacy fixed paths automatically receive a `_SYMBOL`
+suffix before the extension. Existing files are not renamed or migrated. Pass the
+symbol's minute file to the analyzer with `--csv`. Multiple processes or venue
+pairs trading the same symbol still share paths; use separate directories when
+those also need isolation.
 
 ## Credentials (`.env`, live only)
 
