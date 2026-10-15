@@ -260,16 +260,18 @@ def _get(d: dict, section: str, key: str, default):
 
 
 def _symbol_path(path: str, symbol: str) -> str:
-    """Expand log templates; legacy fixed paths also get a symbol suffix."""
+    """Expand lowercase symbol directories, including legacy fixed paths."""
     if not path:
         return path
-    tag = quote(symbol, safe="")
+    tag = quote(symbol.lower(), safe="")
     if tag in (".", ".."):
         tag = tag.replace(".", "%2E")
     if "{symbol}" in path:
         return path.replace("{symbol}", tag)
-    stem, ext = os.path.splitext(path)
-    return f"{stem}_{tag}{ext}"
+    directory, filename = os.path.split(path)
+    if os.path.basename(directory) == tag:
+        return path
+    return os.path.join(directory, tag, filename)
 
 
 # ------------------------------------------------------------------ env layer
@@ -409,12 +411,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         http_keepalive_sec=float(_get(raw, "execution", "http_keepalive_sec", 10.0)),
         recorder_enabled=bool(_get(raw, "recorder", "enabled", True)),
         recorder_csv=_symbol_path(
-            _get(raw, "recorder", "csv", "logs/minutes_{symbol}.csv"), symbol),
+            _get(raw, "recorder", "csv", "logs/{symbol}/minutes.csv"), symbol),
         log_level=str(_get(raw, "logging", "level", "INFO")).upper(),
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_symbol_path(
-            _get(raw, "logging", "trades_csv", "logs/trades_{symbol}.csv"), symbol),
+            _get(raw, "logging", "trades_csv", "logs/{symbol}/trades.csv"), symbol),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_symbol_path(
-            _get(raw, "logging", "file", "logs/engine_{symbol}.log"), symbol),
+            _get(raw, "logging", "file", "logs/{symbol}/engine.log"), symbol),
     )

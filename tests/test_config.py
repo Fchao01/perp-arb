@@ -66,9 +66,11 @@ def test_tradexyz_hedge():
 def test_log_paths_are_separate_for_each_symbol():
     for symbol in ("LIT", "BTC", "ETH"):
         cfg = load(MINIMAL, symbol=symbol)
-        assert cfg.recorder_csv == f"logs/minutes_{symbol}.csv"
-        assert cfg.trades_csv == f"logs/trades_{symbol}.csv"
-        assert cfg.log_file == f"logs/engine_{symbol}.log"
+        assert cfg.recorder_csv == f"logs/{symbol.lower()}/minutes.csv"
+        assert cfg.trades_csv == f"logs/{symbol.lower()}/trades.csv"
+        assert cfg.log_file == f"logs/{symbol.lower()}/engine.log"
+    assert load(MINIMAL, symbol="BTC").trades_csv == load(
+        MINIMAL, symbol="btc").trades_csv
 
 
 def test_log_templates_and_legacy_fixed_paths():
@@ -79,9 +81,11 @@ logging:
   trades_csv: "custom/trades.csv"
   file: "custom/engine.log"
 ''', symbol="LIT")
-    assert cfg.recorder_csv == "data/LIT/minutes.csv"
-    assert cfg.trades_csv == "custom/trades_LIT.csv"
-    assert cfg.log_file == "custom/engine_LIT.log"
+    assert cfg.recorder_csv == "data/lit/minutes.csv"
+    assert cfg.trades_csv == "custom/lit/trades.csv"
+    assert cfg.log_file == "custom/lit/engine.log"
+    assert load(MINIMAL + '\nlogging:\n  trades_csv: "logs/lit/trades.csv"\n',
+                symbol="LIT").trades_csv == "logs/lit/trades.csv"
     # Empty file continues to select console logging.
     assert load(MINIMAL + '\nlogging:\n  file: ""\n').log_file == ""
 
@@ -89,11 +93,11 @@ logging:
 def test_symbol_cannot_escape_log_directory_or_collide_with_encoded_name():
     cfg = load(MINIMAL + '\nrecorder:\n  csv: "logs/{symbol}/minutes.csv"\n',
                symbol="../BTC/USD")
-    assert cfg.recorder_csv == "logs/..%2FBTC%2FUSD/minutes.csv"
-    assert cfg.trades_csv == "logs/trades_..%2FBTC%2FUSD.csv"
+    assert cfg.recorder_csv == "logs/..%2Fbtc%2Fusd/minutes.csv"
+    assert cfg.trades_csv == "logs/..%2Fbtc%2Fusd/trades.csv"
     assert load(MINIMAL, symbol="BTC/USD").trades_csv != load(
         MINIMAL, symbol="BTC%2FUSD").trades_csv
-    assert load(MINIMAL, symbol="..").trades_csv == "logs/trades_%2E%2E.csv"
+    assert load(MINIMAL, symbol="..").trades_csv == "logs/%2E%2E/trades.csv"
 
 
 def expect_error(yaml_text: str, needle: str, **kw):

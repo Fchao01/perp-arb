@@ -32,12 +32,12 @@
 # full round trip nets >= upper + lower bps after fees by construction.
 #
 # midline_bps is a number YOU derive from recorded data. Run the bot
-# (--record-only) to collect logs/minutes_SNDK.csv, then:
-#     python3 tools/analyze.py --csv logs/minutes_SNDK.csv
+# (--record-only) to collect logs/sndk/minutes.csv, then:
+#     python3 tools/analyze.py --csv logs/sndk/minutes.csv
 #
 # midline_bps 是你根据采集数据设定的值。先运行机器人（--record-only）采集
-# logs/minutes_SNDK.csv，再运行以下命令获取建议值（按实际品种替换 SNDK）：
-#     python3 tools/analyze.py --csv logs/minutes_SNDK.csv
+# logs/sndk/minutes.csv，再运行以下命令获取建议值（按实际品种替换 SNDK）：
+#     python3 tools/analyze.py --csv logs/sndk/minutes.csv
 # 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
 # 扣费后净赚 >= upper + lower bps。
 thresholds:
@@ -103,9 +103,9 @@ execution:
 # 供 tools/analyze.py 分析并设定上方 thresholds。
 recorder:
   enabled: true
-  # {symbol} is replaced by --symbol, e.g. logs/minutes_LIT.csv.
-  # 自动按币种分文件；旧固定路径也会自动加 _币种 后缀。
-  csv: "logs/minutes_{symbol}.csv"
+  # {symbol} is the lowercase --symbol, e.g. BTC -> logs/btc/minutes.csv.
+  # 自动按小写币种建目录；旧固定路径也会自动插入币种目录。
+  csv: logs/{symbol}/minutes.csv
 
 # ==================== LOGGING & DASHBOARD / 日志与仪表盘 ====================
 # On a terminal the bot shows a live Rich dashboard (books, signal, positions,
@@ -118,6 +118,6 @@ recorder:
 logging:
   level: INFO
   status_interval_sec: 30.0
-  trades_csv: "logs/trades_{symbol}.csv"
+  trades_csv: logs/{symbol}/trades.csv
   dashboard: true
-  file: "logs/engine_{symbol}.log"
+  file: logs/{symbol}/engine.log

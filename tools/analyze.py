@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Analyze recorded minute data and suggest config.yaml thresholds.
 
-Reads the CSV written by the built-in recorder (select logs/minutes_SYMBOL.csv
-with --csv; omission still uses the legacy logs/minutes.csv) and prints:
+Reads the CSV written by the built-in recorder (logs/minutes.csv by default)
+and prints:
 
   * the premium distribution (midline candidates),
   * how often each candidate upper/lower band would have fired,
@@ -12,7 +12,7 @@ with --csv; omission still uses the legacy logs/minutes.csv) and prints:
 以及可直接粘贴进 config.yaml 的 thresholds 建议值。
 
 Usage:
-    python3 tools/analyze.py --csv logs/minutes_LIT.csv
+    python3 tools/analyze.py                    # logs/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
 """
 from __future__ import annotations

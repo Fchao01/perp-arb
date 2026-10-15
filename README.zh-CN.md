@@ -93,12 +93,12 @@ python3 main.py --record-only --symbol SNDK --primary entropy --hedge lighter-rh
 ```
 
 至少运行几个小时（最好一整天——溢价存在日内规律），数据写入
-`logs/minutes_{symbol}.csv`。
+`logs/{symbol}/minutes.csv`。
 
 **第二步：分析数据、设定阈值：**
 
 ```bash
-python3 tools/analyze.py --csv logs/minutes_SNDK.csv
+python3 tools/analyze.py --csv logs/sndk/minutes.csv
 ```
 
 它会输出溢价分布、各档带宽的历史触发频率，以及可直接粘贴进
@@ -118,7 +118,7 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 **仪表盘。** 在终端运行时会显示实时 Rich 仪表盘：两边盘口（含数据龄/点差）、
 持仓与上限、账户权益与本次会话盈亏、两个方向的可成交溢价对比完整门槛
 （已含手续费与库存加价，● 表示已武装）、数据采集进度、最近成交，以及日志
-尾部（完整日志写入 `logging.file`，默认 `logs/engine_{symbol}.log`）。`--record-only`
+尾部（完整日志写入 `logging.file`，默认 `logs/{symbol}/engine.log`）。`--record-only`
 模式同样可用。加 `--cn` 参数可使仪表盘全部以中文显示。`--no-dashboard`
 可切换为纯日志输出（nohup/systemd 等非终端环境会自动退回纯日志），也可
 设置 `logging.dashboard: false`。
@@ -162,15 +162,15 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
-| `recorder.*` | 分钟数据采集器 | 开启，`logs/minutes_{symbol}.csv` |
-| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/engine_{symbol}.log` |
+| `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
+| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/{symbol}/engine.log` |
 
-日志自动按 `--symbol` 分文件。例如 `--symbol LIT` 会写入
-`logs/minutes_LIT.csv`、`logs/trades_LIT.csv` 和 `logs/engine_LIT.log`；
-切换成 BTC 则写入对应的 BTC 文件，同币种重启会继续追加。
+日志自动按 `--symbol` 的小写名称建目录。例如 `--symbol LIT` 会写入
+`logs/lit/minutes.csv`、`logs/lit/trades.csv` 和 `logs/lit/engine.log`；
+切换成 BTC 则写入 `logs/btc/` 目录，同币种重启会继续追加。
 可在 `recorder.csv`、`logging.trades_csv`、`logging.file` 中使用 `{symbol}`
-自定义路径，例如 `logs/{symbol}/trades.csv`。旧的固定路径也会自动在扩展名前
-加 `_币种` 后缀；已有日志不会被改名或迁移。分析时用 `--csv` 指定对应币种的分钟文件。
+自定义路径，例如 `logs/{symbol}/trades.csv`。旧的固定路径也会自动插入小写币种目录，
+例如 `logs/trades.csv` 会变成 `logs/btc/trades.csv`；已有日志不会被改名或迁移。分析时用 `--csv` 指定对应币种的分钟文件。
 同币种的不同交易所组合或多个进程仍会共享路径，需要隔离时使用不同的目录配置。
 
 ## 密钥配置（`.env`，仅实盘需要）
