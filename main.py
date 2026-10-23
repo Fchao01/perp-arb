@@ -32,7 +32,8 @@ from entropy_arb.engine import Engine
 
 
 def setup_logging(level: str, log_file: str = None,
-                  extra_handler: logging.Handler = None) -> None:
+                  extra_handler: logging.Handler = None,
+                  console: bool = False) -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level, logging.INFO))
     fmt = logging.Formatter(
@@ -43,10 +44,12 @@ def setup_logging(level: str, log_file: str = None,
         if d:
             os.makedirs(d, exist_ok=True)
         h = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    else:
+        h.setFormatter(fmt)
+        root.addHandler(h)
+    if console or not log_file:
         h = logging.StreamHandler()
-    h.setFormatter(fmt)
-    root.addHandler(h)
+        h.setFormatter(fmt)
+        root.addHandler(h)
     if extra_handler is not None:
         root.addHandler(extra_handler)
     logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -131,9 +134,9 @@ def main() -> None:
         setup_logging(cfg.log_level, log_file=cfg.log_file,
                       extra_handler=log_buffer)
     else:
-        # Keep a durable file log in --no-dashboard, nohup, systemd and other
-        # non-TTY runs as well; stdout alone is easy to lose or truncate.
-        setup_logging(cfg.log_level, log_file=cfg.log_file)
+        # Keep a durable file log while retaining the plain terminal output
+        # expected from --no-dashboard, nohup and other non-TTY runs.
+        setup_logging(cfg.log_level, log_file=cfg.log_file, console=True)
 
     try:
         asyncio.run(amain(cfg, record_only=args.record_only,
