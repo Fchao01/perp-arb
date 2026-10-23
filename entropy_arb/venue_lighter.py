@@ -85,9 +85,14 @@ class AccountOrdersFeed:
                     continue
                 fb = float(o.get("filled_base_amount") or 0.0)
                 fq = float(o.get("filled_quote_amount") or 0.0)
+                oid = (o.get("order_id") or o.get("order_index")
+                       or o.get("id"))
                 self._resolve(coi, {"status": status, "filled_base": fb,
                                     "filled_quote": fq,
-                                    "avg_px": (fq / fb) if fb > 0 else None})
+                                    "avg_px": (fq / fb) if fb > 0 else None,
+                                    "exchange_order_id": (str(oid)
+                                                           if oid is not None
+                                                           else None)})
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = 1.0
@@ -273,7 +278,30 @@ class LighterVenue:
         """Market order with avg-price protection; settle via account ws."""
         assert self.signer is not None
         from lighter import SignerClient
+        started_mono = time.monotonic()
+        started_ts = time.time()
         coi = self._next_coi()
+        client_order_id = str(coi)
+        ack_mono = None
+        ack_ts = None
+
+        def finish(info: dict) -> dict:
+            done_mono = time.monotonic()
+            out = dict(info)
+            out.setdefault("client_order_id", client_order_id)
+            out.setdefault("exchange_order_id", None)
+            out["send_start_ts"] = started_ts
+            out["ack_ts"] = ack_ts
+            out["settle_ts"] = time.time()
+            out["submit_latency_ms"] = (
+                (ack_mono - started_mono) * 1000.0
+                if ack_mono is not None else None)
+            out["confirm_latency_ms"] = (
+                (done_mono - ack_mono) * 1000.0
+                if ack_mono is not None else None)
+            out["total_latency_ms"] = (done_mono - started_mono) * 1000.0
+            return out
+
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
@@ -295,8 +323,10 @@ class LighterVenue:
             msg = f"{type(e).__name__}: {e}"
             if getattr(e, "status", None) == 429 or "(429)" in str(e):
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return finish({"status": "send-failed", "filled_base": 0.0,
+                           "avg_px": None, "err": msg, "unresolved": False})
+        ack_mono = time.monotonic()
+        ack_ts = time.time()
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
@@ -304,21 +334,24 @@ class LighterVenue:
                 f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
             if "rate limit" in msg.lower():
                 msg = "RATE_LIMITED: " + msg
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": msg, "unresolved": False}
+            return finish({"status": "send-failed", "filled_base": 0.0,
+                           "avg_px": None, "err": msg, "unresolved": False})
         if fut is None:
-            return {"status": "sent-unconfirmed", "filled_base": 0.0,
-                    "avg_px": None, "err": None, "unresolved": True}
+            return finish({"status": "sent-unconfirmed", "filled_base": 0.0,
+                           "avg_px": None, "err": None, "unresolved": True})
         try:
             info = await asyncio.wait_for(fut, timeout=self.settle_timeout)
-            return {"status": info["status"], "filled_base": info["filled_base"],
-                    "avg_px": info.get("avg_px"), "err": None, "unresolved": False}
+            return finish({"status": info["status"],
+                           "filled_base": info["filled_base"],
+                           "avg_px": info.get("avg_px"), "err": None,
+                           "unresolved": False,
+                           "exchange_order_id": info.get("exchange_order_id")})
         except asyncio.TimeoutError:
             self.orders_feed.unwatch(coi)
             log.warning("[%s] no settle confirmation for coi %d in %.1fs",
                         self.name, coi, self.settle_timeout)
-            return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
-                    "err": None, "unresolved": True}
+            return finish({"status": "timeout", "filled_base": 0.0,
+                           "avg_px": None, "err": None, "unresolved": True})
 
     # -------------------------------------------------------------- accounts
 

@@ -37,12 +37,12 @@ def setup_logging(level: str, log_file: str = None,
     root.setLevel(getattr(logging, level, logging.INFO))
     fmt = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S")
+        datefmt="%Y-%m-%d %H:%M:%S")
     if log_file:
         d = os.path.dirname(log_file)
         if d:
             os.makedirs(d, exist_ok=True)
-        h = logging.FileHandler(log_file)
+        h = logging.FileHandler(log_file, mode="a", encoding="utf-8")
     else:
         h = logging.StreamHandler()
     h.setFormatter(fmt)
@@ -131,7 +131,9 @@ def main() -> None:
         setup_logging(cfg.log_level, log_file=cfg.log_file,
                       extra_handler=log_buffer)
     else:
-        setup_logging(cfg.log_level)
+        # Keep a durable file log in --no-dashboard, nohup, systemd and other
+        # non-TTY runs as well; stdout alone is easy to lose or truncate.
+        setup_logging(cfg.log_level, log_file=cfg.log_file)
 
     try:
         asyncio.run(amain(cfg, record_only=args.record_only,

@@ -118,6 +118,8 @@ recorder:
 logging:
   level: INFO
   status_interval_sec: 30.0
+  # One row per corrective hedge, including realized close PnL.
+  hedges_csv: logs/{symbol}/hedges.csv
   trades_csv: logs/{symbol}/trades.csv
   dashboard: true
   file: logs/{symbol}/engine.log

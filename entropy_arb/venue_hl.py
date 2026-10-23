@@ -182,8 +182,31 @@ class HLVenue:
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
                          reduce_only: bool = False) -> dict:
         assert self.account is not None and self.asset_id >= 0
+        started_mono = time.monotonic()
+        started_ts = time.time()
         s = self._signing
         cloid = self._next_cloid()
+        client_order_id = str(cloid)
+        ack_mono = None
+        ack_ts = None
+
+        def finish(info: dict) -> dict:
+            done_mono = time.monotonic()
+            out = dict(info)
+            out.setdefault("client_order_id", client_order_id)
+            out.setdefault("exchange_order_id", None)
+            out["send_start_ts"] = started_ts
+            out["ack_ts"] = ack_ts
+            out["settle_ts"] = time.time()
+            out["submit_latency_ms"] = (
+                (ack_mono - started_mono) * 1000.0
+                if ack_mono is not None else None)
+            out["confirm_latency_ms"] = (
+                (done_mono - ack_mono) * 1000.0
+                if ack_mono is not None else None)
+            out["total_latency_ms"] = (done_mono - started_mono) * 1000.0
+            return out
+
         order_req = {"coin": self.coin, "is_buy": is_buy, "sz": round(qty, 8),
                      "limit_px": limit_px,
                      "order_type": {"limit": {"tif": "Ioc"}},
@@ -197,17 +220,20 @@ class HLVenue:
             payload = {"action": action, "nonce": nonce, "signature": sig,
                        "vaultAddress": None, "expiresAfter": None}
         except Exception as e:
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": f"signing failed: {e!r}", "unresolved": False}
+            return finish({"status": "send-failed", "filled_base": 0.0,
+                           "avg_px": None, "err": f"signing failed: {e!r}",
+                           "unresolved": False})
 
         body, err, unresolved = await self._post_exchange(payload)
+        ack_mono = time.monotonic()
+        ack_ts = time.time()
         if err is not None:
-            return {"status": "send-failed", "filled_base": 0.0, "avg_px": None,
-                    "err": err, "unresolved": False}
+            return finish({"status": "send-failed", "filled_base": 0.0,
+                           "avg_px": None, "err": err, "unresolved": False})
         if not unresolved:
             res = self._parse(body)
             if not res.get("unresolved"):
-                return res
+                return finish({**res, "client_order_id": client_order_id})
         # unknown outcome: poll orderStatus by cloid until the deadline
         deadline = time.time() + self.settle_timeout
         while time.time() < deadline:
@@ -227,11 +253,20 @@ class HLVenue:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if status != "open":
-                    return {"status": status, "filled_base": filled,
-                            "avg_px": None, "err": None, "unresolved": False}
+                    inner_oid = inner.get("oid") or o.get("oid")
+                    avg_px = inner.get("avgPx") or o.get("avgPx")
+                    return finish({"status": status, "filled_base": filled,
+                                   "avg_px": (float(avg_px)
+                                              if avg_px is not None else None),
+                                   "unresolved": False,
+                                   "client_order_id": client_order_id,
+                                   "exchange_order_id": (str(inner_oid)
+                                                          if inner_oid is not None
+                                                          else None)})
             await asyncio.sleep(0.5)
-        return {"status": "timeout", "filled_base": 0.0, "avg_px": None,
-                "err": None, "unresolved": True}
+        return finish({"status": "timeout", "filled_base": 0.0,
+                       "avg_px": None, "err": None, "unresolved": True,
+                       "client_order_id": client_order_id})
 
     async def _post_exchange(self, payload: dict):
         try:
@@ -270,6 +305,8 @@ class HLVenue:
             return {"status": "filled",
                     "filled_base": float(f.get("totalSz") or 0.0),
                     "avg_px": float(f["avgPx"]) if f.get("avgPx") else None,
+                    "exchange_order_id": (str(f["oid"])
+                                           if f.get("oid") is not None else None),
                     "err": None, "unresolved": False}
         if "error" in st:
             msg = str(st["error"])

@@ -171,11 +171,12 @@ the selected primary; for Entropy it overrides legacy `entropy:` settings. Full 
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
 | `recorder.*` | minute-data recorder | on, `logs/{symbol}/minutes.csv` |
-| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/{symbol}/engine.log` |
+| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; durable log file in all modes | on, `logs/{symbol}/engine.log` |
 
 Log files use lowercase symbol directories: LIT writes `logs/lit/minutes.csv`,
 `logs/lit/trades.csv`, and `logs/lit/engine.log`; BTC writes its files under `logs/btc/`.
-Restarting the same symbol appends to its files. Use `{symbol}` in `recorder.csv`,
+Restarting the same symbol appends to its files. The minute recorder avoids
+duplicating the same partial minute after a restart. Use `{symbol}` in `recorder.csv`,
 `logging.trades_csv`, or `logging.file` for custom paths such as
 `logs/{symbol}/trades.csv`. Legacy fixed paths automatically gain a lowercase symbol
 directory: `logs/trades.csv` becomes `logs/btc/trades.csv` for BTC. Existing files are not renamed or migrated. Pass the
@@ -221,6 +222,19 @@ values are shown as unavailable. Balances/account change use the existing
 30-second balance snapshots; hedge count is the existing corrective attempt count.
 Legacy CSV columns and internal `sell_entropy` / `buy_entropy` keys still refer
 to the selected primary. Strategy, sizing and risk rules are unchanged.
+
+Execution telemetry is recorded in the trade CSV: actual average fill prices,
+configured fee rates and fee amounts, client and exchange order IDs, best-bid/
+best-ask snapshots and their ages, plus per-leg `submit_latency_ms`,
+`confirm_latency_ms`, `total_latency_ms`, and the concurrent pair total. These
+are client-observed intervals; `confirm_latency_ms` includes the exchange
+settlement path and network response, so it should not be called pure exchange
+matching time. Corrective hedges are written to `logging.hedges_csv` (default
+`logs/{symbol}/hedges.csv`) with their own IDs, prices, timings, residual size,
+and close PnL when the source fill price is known. A blank close PnL means the
+position could not be fully attributed to a fill observed by this process.
+Use `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` to print
+per-leg and pair latency percentiles and the share under a 350ms target.
 
 ## How execution works
 

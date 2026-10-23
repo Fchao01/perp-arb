@@ -163,11 +163,11 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
-| `logging.dashboard` / `logging.file` | 终端仪表盘；开启时日志写入文件 | 开启，`logs/{symbol}/engine.log` |
+| `logging.dashboard` / `logging.file` | 终端仪表盘；所有模式都持续写入日志文件 | 开启，`logs/{symbol}/engine.log` |
 
 日志自动按 `--symbol` 的小写名称建目录。例如 `--symbol LIT` 会写入
 `logs/lit/minutes.csv`、`logs/lit/trades.csv` 和 `logs/lit/engine.log`；
-切换成 BTC 则写入 `logs/btc/` 目录，同币种重启会继续追加。
+切换成 BTC 则写入 `logs/btc/` 目录，同币种重启会继续追加；分钟采集器会避免重启时重复写入同一个未完成分钟。
 可在 `recorder.csv`、`logging.trades_csv`、`logging.file` 中使用 `{symbol}`
 自定义路径，例如 `logs/{symbol}/trades.csv`。旧的固定路径也会自动插入小写币种目录，
 例如 `logs/trades.csv` 会变成 `logs/btc/trades.csv`；已有日志不会被改名或迁移。分析时用 `--csv` 指定对应币种的分钟文件。
@@ -205,6 +205,16 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 成交价未知时现有累计成交额仍可能按计划限价估算；当前通知不会把未知的本次金额、盈利填成零。
 余额及账户权益变化使用现有每 30 秒轮询的最新快照，并非逐笔刷新；对冲笔数沿用已有补对冲尝试计数。
 原 CSV 列名及内部 `sell_entropy` / `buy_entropy` 标识保留兼容，现在对应所选主腿。
+
+交易 CSV 现在还记录实际平均成交价、手续费率和手续费金额、客户端及交易所订单 ID、
+下单时的买卖一档盘口及盘口年龄，以及每条腿的 `submit_latency_ms`、
+`confirm_latency_ms`、`total_latency_ms` 和并发双腿总耗时。这里的耗时是客户端观测值；
+`confirm_latency_ms` 包含交易所结算和网络返回，不能直接等同于纯撮合耗时。
+补对冲单单独写入 `logging.hedges_csv`（默认 `logs/{symbol}/hedges.csv`），包括实际价格、
+订单 ID、耗时、剩余敞口，以及在原始成交价已知时计算的单腿平仓 PnL。PnL 为空表示该仓位
+不能完全归因到本进程观察到的成交。
+可用 `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` 输出每条腿和双腿总耗时的
+均值、P50、P95、P99，以及低于 350ms 目标的比例。
 
 ## 执行机制
 

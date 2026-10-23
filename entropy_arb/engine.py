@@ -39,7 +39,24 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "buy_limit", "sell_limit", "buy_notional", "sell_notional",
               "exp_edge_usd", "gross_edge_usd", "marginal_premium_bps",
               "midline_bps", "inv_add_bps", "ok", "buy_fill", "sell_fill",
-              "buy_status", "sell_status", "fill_edge_usd"]
+              "buy_status", "sell_status", "fill_edge_usd", "trade_id",
+              "decision_ts", "buy_avg_px", "sell_avg_px", "buy_exec_notional",
+              "sell_exec_notional", "buy_fee_bps", "sell_fee_bps",
+              "buy_fee_usd", "sell_fee_usd", "buy_client_order_id",
+              "buy_exchange_order_id", "sell_client_order_id",
+              "sell_exchange_order_id", "buy_send_ts", "buy_ack_ts",
+              "buy_settle_ts", "sell_send_ts", "sell_ack_ts", "sell_settle_ts",
+              "buy_book_bid", "buy_book_ask",
+              "sell_book_bid", "sell_book_ask", "buy_book_age_ms",
+              "sell_book_age_ms", "buy_submit_latency_ms",
+              "sell_submit_latency_ms", "buy_confirm_latency_ms",
+              "sell_confirm_latency_ms", "buy_total_latency_ms",
+              "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty"]
+HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
+                "filled_qty", "status", "limit_px", "avg_px", "fee_bps",
+                "fee_usd", "client_order_id", "exchange_order_id",
+                "total_latency_ms", "close_pnl_usd", "source_trade_ids",
+                "residual_after"]
 BALANCE_POLL_SEC = 30.0
 
 
@@ -53,6 +70,13 @@ class Engine:
         self.venues: Dict[str, object] = {}
         self.recorder: Optional[MinuteRecorder] = None
         self.markets_ready = False
+        # Python 3.9 binds asyncio synchronization primitives at
+        # construction time; create a loop for synchronous test/setup code
+        # after a previous asyncio.run() has closed the default loop.
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         self.stop = asyncio.Event()
         self._update_evt = asyncio.Event()
         self._reconcile_evt = asyncio.Event()
@@ -77,6 +101,10 @@ class Engine:
         self._min_base = 0.0
         self._min_notional = 10.0
         self._mtm_baseline: Optional[float] = None
+        self._trade_seq = 0
+        self._last_trade_id: Optional[str] = None
+        self._lots: Dict[str, deque] = {}
+        self.total_hedge_pnl = 0.0
         # proactive per-venue send budget: timestamps of recent order sends
         self._sends: Dict[str, deque] = {}
         # reactive per-venue throttle: venue key -> excluded until
@@ -165,6 +193,14 @@ class Engine:
             self.hedge.init_signer()
             if self.entropy.kind == self.hedge.kind == "hl":
                 self.entropy.share_nonces_with(self.hedge)
+            # Pay the TLS/connection setup cost before the strategy is armed.
+            # The periodic keepalive below protects subsequent orders; this
+            # first warmup prevents the first live opportunity from measuring
+            # a cold connection as strategy latency.
+            warmups = [v.warm_http() for v in self.venues.values()
+                       if hasattr(v, "warm_http")]
+            if warmups:
+                await asyncio.gather(*warmups, return_exceptions=True)
         if (self.entropy.kind == self.hedge.kind == "hl"
                 and self.entropy._query_address()
                 and self.entropy._query_address() == self.hedge._query_address()):
@@ -358,7 +394,7 @@ class Engine:
         if unresolved:
             self._reconcile_evt.set()
         else:
-            await self._maybe_hedge()
+            await self._maybe_hedge(self._last_trade_id)
         self._update_evt.set()  # freed venues may have a queued opportunity
 
     def _scan(self, now: float):
@@ -424,6 +460,23 @@ class Engine:
         if self.halted:
             return False
         cfg = self.cfg
+        self._trade_seq += 1
+        trade_id = f"{int(time.time() * 1000)}-{self._trade_seq}"
+        self._last_trade_id = trade_id
+        decision_ts = time.time()
+        decision_mono = time.monotonic()
+        buy_book = getattr(buy, "book", None)
+        sell_book = getattr(sell, "book", None)
+        book_snapshot = {
+            "buy_book_bid": buy_book.best_bid() if buy_book else None,
+            "buy_book_ask": buy_book.best_ask() if buy_book else None,
+            "sell_book_bid": sell_book.best_bid() if sell_book else None,
+            "sell_book_ask": sell_book.best_ask() if sell_book else None,
+            "buy_book_age_ms": ((decision_ts - buy_book.last_update_ts) * 1000.0
+                                 if buy_book and buy_book.last_update_ts else None),
+            "sell_book_age_ms": ((decision_ts - sell_book.last_update_ts) * 1000.0
+                                  if sell_book and sell_book.last_update_ts else None),
+        }
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
@@ -437,14 +490,27 @@ class Engine:
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
         self._record_send(buy)
         self._record_send(sell)
-        res = await asyncio.gather(
-            buy.send_taker(is_buy=True, qty=plan.qty, limit_px=buy_bound),
-            sell.send_taker(is_buy=False, qty=plan.qty, limit_px=sell_bound),
-            return_exceptions=True)
-        binfo, sinfo = (r if isinstance(r, dict) else
-                        {"status": "send-failed", "filled_base": 0.0,
-                         "avg_px": None, "err": repr(r), "unresolved": False}
-                        for r in res)
+        async def send_leg(v, *, is_buy, limit_px):
+            dispatch_mono = time.monotonic()
+            dispatch_ts = time.time()
+            try:
+                info = await v.send_taker(is_buy=is_buy, qty=plan.qty,
+                                          limit_px=limit_px)
+            except Exception as exc:
+                info = {"status": "send-failed", "filled_base": 0.0,
+                        "avg_px": None, "err": repr(exc),
+                        "unresolved": False}
+            info = dict(info)
+            info.setdefault("send_start_ts", dispatch_ts)
+            info.setdefault("total_latency_ms",
+                            (time.monotonic() - dispatch_mono) * 1000.0)
+            info["engine_dispatch_latency_ms"] = (
+                dispatch_mono - decision_mono) * 1000.0
+            return info
+
+        binfo, sinfo = await asyncio.gather(
+            send_leg(buy, is_buy=True, limit_px=buy_bound),
+            send_leg(sell, is_buy=False, limit_px=sell_bound))
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
@@ -467,10 +533,15 @@ class Engine:
             fill_edge = matched * (sinfo["avg_px"] * (1 - plan.sell_fee)
                                    - binfo["avg_px"] * (1 + plan.buy_fee))
             self.total_fill_edge += fill_edge
+        self._add_lot(buy, bfill, binfo.get("avg_px"), plan.buy_fee, trade_id)
+        self._add_lot(sell, -sfill, sinfo.get("avg_px"), plan.sell_fee, trade_id)
         log.info("[SETTLED] %s: buy %s %s %.6g/%.6g | sell %s %s %.6g/%.6g | "
-                 "matched %.6g | fill edge $%.4f", direction,
+                 "matched %.6g | fill edge $%.4f | latency buy %.1fms "
+                 "sell %.1fms", direction,
                  buy.name, binfo["status"], bfill, plan.qty,
-                 sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge)
+                 sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge,
+                 binfo.get("total_latency_ms") or -1.0,
+                 sinfo.get("total_latency_ms") or -1.0)
         buy.last_traded_ts = sell.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
@@ -502,7 +573,8 @@ class Engine:
                            None if unresolved else fill_edge,
                            f"{binfo['status']}/{sinfo['status']}", sent_ok)
         self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
-                      binfo["status"], sinfo["status"], fill_edge, inv_bps)
+                      binfo["status"], sinfo["status"], fill_edge, inv_bps,
+                      trade_id, decision_ts, book_snapshot, binfo, sinfo)
         self.last_trade_ts = time.time()
         if self.cfg.telegram.enabled and (bfill or sfill or unresolved):
             self._notify_trade(buy, sell, plan, binfo, sinfo, fill_edge,
@@ -547,12 +619,61 @@ class Engine:
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
             "ok": ok})
 
-    async def _maybe_hedge(self) -> None:
+    def _add_lot(self, venue, signed_qty: float, price: Optional[float],
+                 fee_rate: float, trade_id: str) -> None:
+        if abs(signed_qty) <= 1e-12:
+            return
+        self._lots.setdefault(venue.key, deque()).append({
+            "qty": signed_qty, "price": price, "fee_rate": fee_rate,
+            "trade_id": trade_id})
+
+    def _realize_lots(self, venue_key: str, close_signed_qty: float,
+                      close_px: Optional[float], close_fee_rate: float):
+        """Consume known entry lots and return (pnl, source ids).
+
+        A None PnL means the close was not fully attributable to known entry
+        fills (for example, an inventory position that predated this process).
+        """
+        if abs(close_signed_qty) <= 1e-12:
+            return None, []
+        lots = self._lots.setdefault(venue_key, deque())
+        remaining = abs(close_signed_qty)
+        close_sign = 1.0 if close_signed_qty > 0 else -1.0
+        pnl = 0.0
+        known = close_px is not None
+        source_ids = []
+        while remaining > 1e-12 and lots:
+            lot = next((candidate for candidate in lots
+                        if (1.0 if candidate["qty"] > 0 else -1.0)
+                        != close_sign), None)
+            if lot is None:
+                break
+            lot_sign = 1.0 if lot["qty"] > 0 else -1.0
+            take = min(remaining, abs(lot["qty"]))
+            source_ids.append(lot["trade_id"])
+            if lot["price"] is None or close_px is None:
+                known = False
+            elif lot_sign > 0:
+                pnl += take * (close_px * (1.0 - close_fee_rate)
+                               - lot["price"] * (1.0 + lot["fee_rate"]))
+            else:
+                pnl += take * (lot["price"] * (1.0 - lot["fee_rate"])
+                               - close_px * (1.0 + close_fee_rate))
+            lot["qty"] += close_sign * take
+            remaining -= take
+            if abs(lot["qty"]) <= 1e-12:
+                lots.remove(lot)
+        if remaining > 1e-12:
+            known = False
+        return (pnl if known and source_ids else None), list(dict.fromkeys(source_ids))
+
+    async def _maybe_hedge(self, source_trade_id: Optional[str] = None) -> None:
         net = sum(v.position for v in self.venues.values())
         if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net)
+            await self._hedge(net, source_trade_id)
 
-    async def _hedge(self, net: float) -> None:
+    async def _hedge(self, net: float,
+                     source_trade_id: Optional[str] = None) -> None:
         """Reduce the venue that carries the imbalance back toward net zero
         (reduce-only taker with hedge_slippage_bps price protection)."""
         cfg = self.cfg
@@ -587,6 +708,11 @@ class Engine:
                 self._record_send(v)  # counts toward the budget, never blocked
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
                                           limit_px=limit, reduce_only=True)
+                fill = info.get("filled_base", 0.0)
+                px = info.get("avg_px")
+                fee_rate = v.fee_bps / 1e4
+                close_pnl = None
+                source_ids = []
                 if info.get("err") or info.get("unresolved"):
                     log.error("[HEDGE] %s: %s", v.name,
                               info.get("err") or "unresolved")
@@ -594,16 +720,22 @@ class Engine:
                         self._mark_limited(v)
                     self._reconcile_evt.set()
                 else:
-                    fill = info["filled_base"]
                     v.position += -fill if is_sell else fill
                     if fill:
-                        px = info.get("avg_px") or limit
-                        fee = v.fee_bps / 1e4
-                        v.cash += fill * px * (1 - fee) if is_sell \
-                            else -fill * px * (1 + fee)
-                        v.volume_usd += fill * px
+                        accounting_px = px or limit
+                        v.cash += fill * accounting_px * (1 - fee_rate) if is_sell \
+                            else -fill * accounting_px * (1 + fee_rate)
+                        v.volume_usd += fill * accounting_px
+                        close_pnl, source_ids = self._realize_lots(
+                            v.key, -fill if is_sell else fill, px, fee_rate)
+                        if close_pnl is not None:
+                            self.total_hedge_pnl += close_pnl
                     log.info("[HEDGE SETTLED] %s %s %.6g/%.6g",
                              v.name, info["status"], fill, qty)
+                self._log_hedge(
+                    source_trade_id, v, "SELL" if is_sell else "BUY", qty,
+                    fill, info, limit, close_pnl, source_ids,
+                    abs(sum(x.position for x in self.venues.values())))
                 v.last_traded_ts = time.time()
             finally:
                 lk.release()
@@ -683,6 +815,9 @@ class Engine:
                 if mid is not None:
                     v.cash -= delta * mid
                 v.position = r
+                # A chain-side correction breaks the local lot basis. Do not
+                # claim a hedge PnL against stale lots after reconciliation.
+                self._lots.setdefault(v.key, deque()).clear()
 
     async def _reconcile_loop(self) -> None:
         while not self.stop.is_set():
@@ -790,8 +925,17 @@ class Engine:
                      self.total_exp_edge, self.total_fill_edge, rec,
                      " *** HALTED ***" if self.halted else "")
 
+    @staticmethod
+    def _csv_value(value, digits: int = 6):
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.{digits}f}"
+        return value
+
     def _log_csv(self, direction, buy, sell, plan: ArbPlan, ok: bool, bfill,
-                 sfill, bstatus, sstatus, fill_edge, inv_bps) -> None:
+                 sfill, bstatus, sstatus, fill_edge, inv_bps, trade_id,
+                 decision_ts, book_snapshot, binfo, sinfo) -> None:
         try:
             path = self.cfg.trades_csv
             d = os.path.dirname(path)
@@ -806,6 +950,20 @@ class Engine:
                 w = csv.writer(fh)
                 if new:
                     w.writerow(CSV_HEADER)
+                bpx = binfo.get("avg_px")
+                spx = sinfo.get("avg_px")
+                buy_fee_usd = (bfill * bpx * plan.buy_fee
+                                if bpx is not None else None)
+                sell_fee_usd = (sfill * spx * plan.sell_fee
+                                 if spx is not None else None)
+                buy_exec_notional = bfill * bpx if bpx is not None else None
+                sell_exec_notional = sfill * spx if spx is not None else None
+                buy_total = binfo.get("total_latency_ms")
+                sell_total = sinfo.get("total_latency_ms")
+                pair_total = (max(x for x in (buy_total, sell_total)
+                                  if x is not None)
+                              if buy_total is not None or sell_total is not None
+                              else None)
                 w.writerow([f"{time.time():.3f}",
                             direction, buy.name, sell.name, f"{plan.qty:.8g}",
                             plan.buy_limit, plan.sell_limit,
@@ -814,6 +972,72 @@ class Engine:
                             f"{plan.marginal_premium_bps:.3f}",
                             f"{self.cfg.midline_bps:.3f}",
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
-                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}"])
+                            f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
+                            trade_id, f"{decision_ts:.3f}",
+                            self._csv_value(bpx), self._csv_value(spx),
+                            self._csv_value(buy_exec_notional),
+                            self._csv_value(sell_exec_notional),
+                            f"{plan.buy_fee * 1e4:.4f}",
+                            f"{plan.sell_fee * 1e4:.4f}",
+                            self._csv_value(buy_fee_usd),
+                            self._csv_value(sell_fee_usd),
+                            binfo.get("client_order_id", ""),
+                            binfo.get("exchange_order_id", ""),
+                            sinfo.get("client_order_id", ""),
+                            sinfo.get("exchange_order_id", ""),
+                            self._csv_value(binfo.get("send_start_ts"), 3),
+                            self._csv_value(binfo.get("ack_ts"), 3),
+                            self._csv_value(binfo.get("settle_ts"), 3),
+                            self._csv_value(sinfo.get("send_start_ts"), 3),
+                            self._csv_value(sinfo.get("ack_ts"), 3),
+                            self._csv_value(sinfo.get("settle_ts"), 3),
+                            self._csv_value(book_snapshot.get("buy_book_bid")),
+                            self._csv_value(book_snapshot.get("buy_book_ask")),
+                            self._csv_value(book_snapshot.get("sell_book_bid")),
+                            self._csv_value(book_snapshot.get("sell_book_ask")),
+                            self._csv_value(book_snapshot.get("buy_book_age_ms"), 3),
+                            self._csv_value(book_snapshot.get("sell_book_age_ms"), 3),
+                            self._csv_value(binfo.get("submit_latency_ms"), 3),
+                            self._csv_value(sinfo.get("submit_latency_ms"), 3),
+                            self._csv_value(binfo.get("confirm_latency_ms"), 3),
+                            self._csv_value(sinfo.get("confirm_latency_ms"), 3),
+                            self._csv_value(buy_total, 3),
+                            self._csv_value(sell_total, 3),
+                            self._csv_value(pair_total, 3),
+                            self._csv_value(abs(bfill - sfill))])
         except Exception:
             log.exception("csv write failed")
+
+    def _log_hedge(self, trade_id, venue, side, requested_qty, filled_qty,
+                   info, limit_px, close_pnl, source_ids, residual_after):
+        try:
+            path = self.cfg.hedges_csv
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            if os.path.exists(path):
+                with open(path) as fh0:
+                    if fh0.readline().strip() != ",".join(HEDGE_HEADER):
+                        os.replace(path, path + ".old")
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as fh:
+                w = csv.writer(fh)
+                if new:
+                    w.writerow(HEDGE_HEADER)
+                px = info.get("avg_px")
+                fee_bps = venue.fee_bps
+                fee_usd = (filled_qty * px * fee_bps / 1e4
+                           if px is not None else None)
+                w.writerow([
+                    f"{time.time():.3f}", trade_id or "", venue.name, side,
+                    f"{requested_qty:.8g}", f"{filled_qty:.8g}",
+                    info.get("status", ""), self._csv_value(limit_px),
+                    self._csv_value(px), f"{fee_bps:.4f}",
+                    self._csv_value(fee_usd), info.get("client_order_id", ""),
+                    info.get("exchange_order_id", ""),
+                    self._csv_value(info.get("total_latency_ms"), 3),
+                    self._csv_value(close_pnl, 6), ";".join(source_ids),
+                    self._csv_value(residual_after),
+                ])
+        except Exception:
+            log.exception("hedge csv write failed")

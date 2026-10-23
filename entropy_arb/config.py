@@ -144,6 +144,7 @@ class Config:
     log_level: str
     status_interval_sec: float
     trades_csv: str
+    hedges_csv: str
     dashboard: bool
     log_file: str
     # runtime
@@ -220,6 +221,7 @@ _SCHEMA: Dict[str, Any] = {
         "level": str,
         "status_interval_sec": float,
         "trades_csv": str,
+        "hedges_csv": str,
         "dashboard": bool,
         "file": str,
     },
@@ -416,6 +418,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         status_interval_sec=float(_get(raw, "logging", "status_interval_sec", 30.0)),
         trades_csv=_symbol_path(
             _get(raw, "logging", "trades_csv", "logs/{symbol}/trades.csv"), symbol),
+        hedges_csv=_symbol_path(
+            _get(raw, "logging", "hedges_csv", "logs/{symbol}/hedges.csv"), symbol),
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_symbol_path(
             _get(raw, "logging", "file", "logs/{symbol}/engine.log"), symbol),

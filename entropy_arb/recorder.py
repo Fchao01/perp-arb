@@ -110,6 +110,7 @@ class MinuteRecorder:
         self._agg: Optional[_MinuteAgg] = None
         self._fh = None
         self._writer = None
+        self._last_written_minute: Optional[int] = None
 
     def _open(self) -> None:
         d = os.path.dirname(self.path)
@@ -128,6 +129,22 @@ class MinuteRecorder:
         if new:
             self._writer.writerow(HEADER)
             self._fh.flush()
+        else:
+            # A clean shutdown flushes the current partial minute. If the
+            # process is restarted before that minute ends, do not append a
+            # second row for the same minute on the next shutdown.
+            try:
+                with open(self.path, newline="") as fh:
+                    rows = csv.reader(fh)
+                    next(rows, None)
+                    last = None
+                    for row in rows:
+                        if row:
+                            last = row
+                    if last:
+                        self._last_written_minute = int(float(last[0])) // 60
+            except (OSError, ValueError, IndexError):
+                self._last_written_minute = None
         log.info("recording 1-minute orderbook data -> %s", self.path)
 
     def _flush_agg(self) -> None:
@@ -136,9 +153,14 @@ class MinuteRecorder:
             return
         if self._writer is None:
             self._open()
+        if (self._last_written_minute is not None
+                and self._agg.minute <= self._last_written_minute):
+            self._agg = None
+            return
         self._writer.writerow(self._agg.row())
         self._fh.flush()
         self.rows_written += 1
+        self._last_written_minute = self._agg.minute
         self._agg = None
 
     def sample(self, now: Optional[float] = None) -> None:
