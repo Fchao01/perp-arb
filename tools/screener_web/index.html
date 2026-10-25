@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Market Observatory · 跨市场观察台</title>
+  <meta name="description" content="RH 与 LIGHTER 全市场只读观察、延迟探测与样本外往返验证。">
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Market Observatory 首页"><span class="brand-mark">m<span>o</span></span><span>MARKET<br>OBSERVATORY</span></a>
+      <div class="workspace-label">研究工作区</div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-tab="ranking"><span>▤</span> 验证排行</button>
+        <button class="nav-item" data-tab="live"><span>◉</span> 实时盘口</button>
+        <button class="nav-item" data-tab="method"><span>⌘</span> 方法与假设</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="readonly-dot"></div><strong>只读连接</strong><p>公共行情 · 无账户权限<br>不签名，不发送订单</p><div class="venues">RH <span>↔</span> LIGHTER</div></div>
+    </aside>
+    <main>
+      <header><span class="breadcrumb">市场研究 <span>/</span> 全市场筛选</span><div class="header-right"><span id="connection" class="connection">正在连接</span><button id="refresh" class="icon-button" aria-label="刷新数据">↻</button></div></header>
+      <section class="page-heading"><div><div class="eyebrow">CROSS-MARKET RESEARCH</div><h1>找到能兑现的价差。</h1><p>先观察深度与延迟，再验证往返。把一次机会与持续优势分开看。</p></div><button id="export" class="button">导出排行 CSV <span>↗</span></button></section>
+      <section class="kpi-grid" aria-label="数据概览">
+        <article class="kpi"><div class="kpi-label">观察市场 <span>01</span></div><div id="market-count" class="kpi-value">—</div><div class="kpi-note">双方共同活跃永续市场</div></article>
+        <article class="kpi"><div class="kpi-label">有效探测 <span>02</span></div><div id="probe-count" class="kpi-value">—</div><div id="probe-note" class="kpi-note">等待公共行情数据</div></article>
+        <article class="kpi"><div class="kpi-label">样本外正值市场 <span>03</span></div><div id="positive-count" class="kpi-value">—</div><div class="kpi-note">通过历史长度与覆盖率检查</div></article>
+        <article class="kpi accent"><div class="kpi-label">影子往返合计 <span>04</span></div><div id="shadow-total" class="kpi-value">—</div><div class="kpi-note">含可估算的剩余库存退出成本</div></article>
+      </section>
+      <div id="error-banner" class="notice danger" hidden role="alert"></div>
+      <div class="notice"><span class="notice-icon">i</span><span><strong>研究结果，不是实盘收益。</strong> 盘口存续率不等于成交率；资金费未观测，合约与抵押品需要人工核验。</span></div>
+      <section id="ranking-section" class="panel tab-section">
+        <div class="panel-heading"><div><h2>样本外验证排行 <span id="ranking-count" class="count-chip">0</span></h2><p id="analysis-subtitle">先采集训练窗口，再冻结参数验证后续数据。</p></div><div class="toolbar"><label class="search"><span>⌕</span><input id="search" placeholder="搜索市场…" aria-label="搜索市场"></label><select id="filter" aria-label="筛选结果"><option value="all">全部市场</option><option value="positive_shadow_sample">样本外正值</option><option value="negative_shadow_sample">样本外负值</option><option value="insufficient">数据不足</option><option value="inventory">有待退出库存</option></select></div></div>
+        <div class="table-wrap"><table><thead><tr><th>市场</th><th>验证阶段</th><th title="两方向目标金额均有足够深度的探测比例">深度覆盖</th><th id="survival-heading" title="历史信号在延迟后仍越过冻结阈值的比例；未知观测计为未证实存续">延迟存续</th><th>往返次数</th><th><button id="sort-net">影子净结果 ↓</button></th><th>回转 P95</th><th title="最盈利小时占全部正利润的比例；越集中越需谨慎">收益集中度</th><th></th></tr></thead><tbody id="ranking-body"></tbody></table></div>
+        <div id="ranking-empty" class="empty-state"><div class="empty-symbol">⌁</div><h3>让数据先走一段。</h3><p>采集启动后可先查看实时盘口。第一段用于训练，后一段才用于验证。</p></div>
+        <footer class="panel-footer"><span>按影子净结果排序 · 显示值不包含未观测资金费</span><span id="report-time">尚无分析结果</span></footer>
+      </section>
+      <section id="live-section" class="panel tab-section" hidden>
+        <div class="panel-heading"><div><h2>当前深度报价</h2><p id="live-subtitle">同一买入金额，按盘口深度计算。仅表示当前报价，不代表能成交。</p></div><span class="live-pill">PUBLIC DATA</span></div>
+        <div class="table-wrap"><table><thead><tr><th>市场</th><th>RH 溢价</th><th>买 RH / 卖 LIGHTER</th><th>买 LIGHTER / 卖 RH</th><th>探测实际间隔</th><th>数据状态</th></tr></thead><tbody id="live-body"></tbody></table></div>
+        <div id="live-empty" class="empty-state"><div class="empty-symbol">◌</div><h3>等待采集进程</h3><p>网页服务不自行连接交易所。请在另一个终端启动 collect。</p></div>
+      </section>
+      <section id="method-section" class="panel tab-section" hidden>
+        <div class="panel-heading"><div><h2>这个筛选器如何判断</h2><p>每个结果都保留假设，避免把报价优势误认为已实现利润。</p></div></div>
+        <div class="method-grid"><article><span>01 / OBSERVE</span><h3>观察同数量深度</h3><p>默认每 5 秒发起一次探测，按目标买入金额确定数量；延迟后仍按原数量报价。缺深度、断线或调度过晚的观测不能当成成功。</p></article><article><span>02 / FREEZE</span><h3>先训练，后冻结</h3><p>只用第一段数据的中线和方向分位数确定阈值。后续验证不重新拟合，避免用未来数据美化结果。</p></article><article><span>03 / ROUND TRIP</span><h3>验证完整往返</h3><p>先根据当时盘口决策，再用延迟后的报价估算双腿执行；反向退出也有延迟。强制退出、剩余库存与观测中断分别显示。</p></article><article><span>04 / REVIEW</span><h3>实盘前还要核验</h3><p>模型假设双腿完整成交，不预测排队、部分成交、冲击或单腿风险。资金费、指数与合约规格、抵押品换算需要进一步确认。</p></article></div>
+        <div class="assumptions"><h3>当前参数</h3><dl id="parameters"><dt>数据</dt><dd>尚未连接采集目录</dd></dl></div>
+      </section>
+      <div class="page-footer"><span>MARKET OBSERVATORY</span><span id="run-label">等待采集目录</span></div>
+    </main>
+  </div>
+  <dialog id="detail"><div class="detail-header"><div><div class="eyebrow">MARKET DETAIL</div><h2 id="detail-symbol">—</h2></div><button id="close-detail" class="icon-button" aria-label="关闭详情">×</button></div><div id="detail-content"></div></dialog>
+</body>
+</html>

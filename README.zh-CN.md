@@ -216,6 +216,20 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 可用 `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` 输出每条腿和双腿总耗时的
 均值、P50、P95、P99，以及低于 350ms 目标的比例。
 
+## 全市场只读筛选与网页
+
+独立脚本扫描 RH 与 LIGHTER 共同活跃永续市场，不需要 `.env` 或私钥，不会下单。
+
+```bash
+python3 tools/market_screener.py collect --hours 72 --notional 300
+# 另一个终端启动网页：http://127.0.0.1:8765
+python3 tools/market_screener.py serve --input logs/screener --port 8765
+```
+
+默认先训练 24 小时，再冻结参数检验后续数据；网页可立即看实时深度报价，分析默认每小时更新。
+影子往返不是实际成交收益，资金费和合约可比性仍需核验。
+详见 [使用方法与模型限制](docs/market_screener.zh-CN.md)。
+
 ## 执行机制
 
 - 两条腿**同时发出吃单**：Lighter 用带均价保护的市价单，在鉴权 websocket

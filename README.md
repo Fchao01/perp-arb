@@ -236,6 +236,24 @@ position could not be fully attributed to a fill observed by this process.
 Use `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` to print
 per-leg and pair latency percentiles and the share under a 350ms target.
 
+## Read-only all-market screener and dashboard
+
+`tools/market_screener.py` independently observes common active RH/Lighter
+perpetual markets. It never loads credentials or submits orders.
+
+```bash
+python3 tools/market_screener.py collect --hours 72 --notional 300
+# In another terminal: http://127.0.0.1:8765
+python3 tools/market_screener.py serve --input logs/screener --port 8765
+```
+
+Collection includes fixed-quantity delayed depth probes. Analysis freezes
+thresholds fitted on the first 24 hours and evaluates later shadow round trips.
+The dashboard exposes live quotes, coverage, delayed signal survival, remaining
+inventory, forced exits and profit concentration. Shadow results are not actual
+PnL or fill probabilities; funding and contract equivalence require review.
+See the [usage and assumptions guide](docs/market_screener.zh-CN.md).
+
 ## How execution works
 
 - Both legs are **taker** orders sent concurrently: Lighter market orders
