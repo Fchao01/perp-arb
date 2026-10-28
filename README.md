@@ -67,6 +67,15 @@ money**: if you type `midline_bps: 5` while the true premium sits at 0, the
 bot happily buys entropy at fair value all day. Measure first, then trade —
 that is what the recorder and analyzer are for.
 
+`midline_bps: auto` takes the midline from the market instead: a
+time-weighted EMA of the live mid premium with a time constant of
+`midline_window_min` (default 60). On start it is seeded from the recorder's
+minute bars of the last window, and the bot does not trade until it has
+`midline_warmup_min` (default 10) of history. Because the band moves with the
+premium, both directions keep firing and the inventory turns over instead of
+pinning one side at its cap. A trending premium still pushes one direction
+(the midline lags), so keep the inventory ladder on.
+
 ## Quick start
 
 ```bash
@@ -159,8 +168,10 @@ the selected primary; for Entropy it overrides legacy `entropy:` settings. Full 
 
 | key | meaning | default |
 |---|---|---|
-| `thresholds.midline_bps` | premium center (measure it!) | — |
+| `thresholds.midline_bps` | premium center (measure it!), or `auto` | — |
 | `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
+| `thresholds.midline_window_min` | auto midline EMA time constant | 60 |
+| `thresholds.midline_warmup_min` | auto midline history needed before trading | 10 |
 | `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
 | `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
 | `*.max_position_usd` | per-venue position cap | 1000 |
@@ -348,7 +359,8 @@ tests/                   python3 -m pytest tests/
 ## Known risks
 
 - **A wrong midline is a losing strategy.** The premium center drifts;
-  re-measure regularly and keep `config.yaml` current.
+  re-measure regularly and keep `config.yaml` current, or use
+  `midline_bps: auto`.
 - **USDG basis** (`lighter-rh`): the hedge quotes in USDG. Part of any
   persistent premium is the stablecoin itself; your midline absorbs the
   level, but a USDG *move* is real PnL.

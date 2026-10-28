@@ -2,10 +2,14 @@
 
 The legacy internal "entropy" slot below represents the selected primary.
 
-The signal is a fixed band around a configured midline (config.yaml):
+The signal is a band around a midline (config.yaml):
 
     SELL entropy / BUY hedge  when executable premium >= midline + upper (+fees)
     BUY entropy / SELL hedge  when executable premium <= midline - lower (+fees)
+
+The midline is either a configured number or, with midline_bps: auto, a
+time-weighted EMA of the live mid premium (seeded from the recorder's minute
+bars on start); the strategy does not trade until that EMA has warmed up.
 
 Around the signal: per-direction persistence arming,
 per-venue inventory ladder + position caps, per-venue order budgets and
@@ -27,6 +31,7 @@ from typing import Dict, List, Optional
 import aiohttp
 
 from .book import ArbPlan, floor_step, plan_arb
+from .center import CenterTracker
 from .config import Config
 from .recorder import MinuteRecorder
 from .telegram import TelegramNotifier, trade_message
@@ -119,6 +124,13 @@ class Engine:
         # per-execution records for the dashboard (newest last)
         self.recent_trades: deque = deque(maxlen=50)
         self.telegram = TelegramNotifier(cfg.telegram)
+        # auto midline: EMA of the mid premium; a gap longer than the window
+        # (books stale, bot paused) restarts it and its warmup
+        window = cfg.midline_window_min * 60.0
+        self.center = CenterTracker(None, tau_sec=window,
+                                    warmup_sec=cfg.midline_warmup_min * 60.0,
+                                    reset_gap_sec=window)
+        self._warm_logged = False
 
     # ------------------------------------------------------------- utilities
 
@@ -146,6 +158,14 @@ class Engine:
 
     def _record_send(self, v) -> None:
         self._sends.setdefault(v.key, deque()).append(time.time())
+
+    @property
+    def midline(self) -> Optional[float]:
+        """The midline in bps: the configured number, or the auto EMA once
+        warmed up (None before that — the strategy waits)."""
+        if not self.cfg.midline_auto:
+            return self.cfg.midline_bps
+        return self.center.value if self.center.ready(time.time()) else None
 
     def request_stop(self) -> None:
         self.stop.set()
@@ -214,10 +234,18 @@ class Engine:
                              self._step)
         self._min_notional = max(cfg.min_order_notional,
                                  self.entropy.min_quote, self.hedge.min_quote)
-        log.info("pair %s(%s)-%s(%s): midline=%+.2fbps band=[-%.2f, +%.2f] "
+        if cfg.midline_auto:
+            seeded = self._seed_center()
+            mid_s = (f"auto (EMA {cfg.midline_window_min:g} min, "
+                     f"{seeded} recorded minute(s) seeded")
+            mid_s += (f", now {self.center.value:+.2f}bps)"
+                      if self.center.value is not None else ")")
+        else:
+            mid_s = f"{cfg.midline_bps:+.2f}bps"
+        log.info("pair %s(%s)-%s(%s): midline=%s band=[-%.2f, +%.2f] "
                  "fees=%.2f+%.2f step=%g min_ntl=$%g",
                  self.entropy.name, self.entropy.conf.symbol, self.hedge.name,
-                 self.hedge.conf.symbol, cfg.midline_bps, cfg.lower_bps,
+                 self.hedge.conf.symbol, mid_s, cfg.lower_bps,
                  cfg.upper_bps, self.entropy.fee_bps, self.hedge.fee_bps,
                  self._step, self._min_notional)
 
@@ -248,6 +276,9 @@ class Engine:
                                              name="balances"))
             tasks.append(asyncio.create_task(self._http_keepalive_loop(),
                                              name="keepalive"))
+        if cfg.midline_auto:
+            tasks.append(asyncio.create_task(self._center_loop(),
+                                             name="center"))
         tasks.append(asyncio.create_task(self._status_loop(), name="status"))
         if live:
             tasks.append(asyncio.create_task(self._reconcile_loop(),
@@ -298,10 +329,11 @@ class Engine:
 
         selling entropy: executable premium must clear midline + upper;
         buying entropy: the reverse premium must clear lower - midline."""
+        midline = self.midline
         if sell.key == "entropy":
-            base = self.cfg.midline_bps + self.cfg.upper_bps
+            base = midline + self.cfg.upper_bps
         else:
-            base = self.cfg.lower_bps - self.cfg.midline_bps
+            base = self.cfg.lower_bps - midline
         return base + self._inv_add_bps(buy, sell)
 
     def _lead_leg(self, buy, sell):
@@ -410,6 +442,12 @@ class Engine:
         """Evaluate both directions; returns the best executable
         (buy, sell, plan), or None."""
         cfg = self.cfg
+        if self.midline is None:
+            if not self._warm_logged:
+                self._warm_logged = True
+                log.info("auto midline warming up (%g min) — no trades until "
+                         "then", cfg.midline_warmup_min)
+            return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
@@ -946,6 +984,47 @@ class Engine:
             return None
         return (em / hm - 1.0) * 1e4
 
+    def _seed_center(self) -> int:
+        """Seed the auto midline from the recorder's minute bars (premium_mean
+        of each minute) within the last window, so a restart keeps its
+        center. Returns the number of minutes used."""
+        path = self.cfg.recorder_csv
+        now = time.time()
+        window = self.cfg.midline_window_min * 60.0
+        samples = []
+        try:
+            with open(path, newline="") as fh:
+                for r in csv.DictReader(fh):
+                    try:
+                        ts = float(r["minute_ts"]) + 60.0
+                        p = float(r["premium_mean_bps"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if now - window <= ts <= now:
+                        samples.append((ts, p))
+        except FileNotFoundError:
+            return 0
+        except Exception:
+            log.exception("could not read %s to seed the midline", path)
+            return 0
+        samples.sort()
+        return self.center.seed(samples)
+
+    async def _center_loop(self) -> None:
+        """Sample the mid premium into the auto midline once a second while
+        both books are fresh."""
+        cfg = self.cfg
+        while not self.stop.is_set():
+            if (self.entropy.book.is_fresh(cfg.staleness_sec)
+                    and self.hedge.book.is_fresh(cfg.staleness_sec)):
+                prem = self.premium_bps()
+                if prem is not None:
+                    self.center.update(time.time(), prem)
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+
     async def _status_loop(self) -> None:
         cfg = self.cfg
         while not self.stop.is_set():
@@ -967,11 +1046,15 @@ class Engine:
             pnl = self.session_pnl()
             rec = (f" | rec {self.recorder.rows_written} rows"
                    if self.recorder else "")
-            log.info("[status] %s | prem %s bps (band %+.2f..%+.2f) | pos %s "
+            midline = self.midline
+            band_s = (f"{midline - cfg.lower_bps:+.2f}..{midline + cfg.upper_bps:+.2f}"
+                      if midline is not None else "midline warming up")
+            if cfg.midline_auto and midline is not None:
+                band_s += f", auto midline {midline:+.2f}"
+            log.info("[status] %s | prem %s bps (band %s) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
                      "fillEdge $%.4f%s%s",
-                     books, prem_s, cfg.midline_bps - cfg.lower_bps,
-                     cfg.midline_bps + cfg.upper_bps, pos, net, self.trades,
+                     books, prem_s, band_s, pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
@@ -1022,7 +1105,7 @@ class Engine:
                             f"{plan.buy_notional:.2f}", f"{plan.sell_notional:.2f}",
                             f"{plan.exp_edge_usd:.4f}", f"{plan.gross_edge_usd:.4f}",
                             f"{plan.marginal_premium_bps:.3f}",
-                            f"{self.cfg.midline_bps:.3f}",
+                            self._csv_value(self.midline, 3),
                             f"{inv_bps:.3f}", int(ok), f"{bfill:.8g}",
                             f"{sfill:.8g}", bstatus, sstatus, f"{fill_edge:.4f}",
                             trade_id, f"{decision_ts:.3f}",

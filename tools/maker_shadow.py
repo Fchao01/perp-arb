@@ -55,6 +55,7 @@ from typing import Callable, Dict, List, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from entropy_arb.book import walk_depth  # noqa: E402
+from entropy_arb.center import CenterTracker  # noqa: E402,F401
 
 log = logging.getLogger("maker_shadow")
 
@@ -76,36 +77,6 @@ def _utc(ts: float) -> str:
 
 def _f(v, d=4):
     return "" if v is None else f"{v:.{d}f}"
-
-
-class CenterTracker:
-    """Premium center in bps: fixed, or a time-weighted EMA of the mid-to-mid
-    premium (primary over hedge) when `fixed` is None."""
-
-    def __init__(self, fixed: Optional[float], tau_sec: float,
-                 warmup_sec: float) -> None:
-        self.fixed = fixed
-        self.tau = max(tau_sec, 1.0)
-        self.warmup = warmup_sec
-        self.value: Optional[float] = fixed
-        self._t0: Optional[float] = None
-        self._last: Optional[float] = None
-
-    def update(self, now: float, premium_bps: float) -> None:
-        if self.fixed is not None:
-            return
-        if self._last is None:
-            self.value, self._t0 = premium_bps, now
-        else:
-            dt = max(now - self._last, 0.0)
-            a = min(dt / self.tau, 1.0)
-            self.value += a * (premium_bps - self.value)
-        self._last = now
-
-    def ready(self, now: float) -> bool:
-        if self.fixed is not None:
-            return True
-        return self._t0 is not None and now - self._t0 >= self.warmup
 
 
 class Quote:

@@ -153,6 +153,24 @@ def test_nonpositive_band():
                  "must be > 0")
 
 
+
+def test_auto_midline():
+    cfg = load("thresholds:\n  midline_bps: auto\n  upper_bps: 1\n"
+               "  lower_bps: 1\n  midline_window_min: 30\n")
+    assert cfg.midline_auto and cfg.midline_bps is None
+    assert cfg.midline_window_min == 30.0 and cfg.midline_warmup_min == 10.0
+    fixed = load(MINIMAL)
+    assert not fixed.midline_auto and fixed.midline_bps == 5.0
+
+
+def test_bad_midline_values():
+    expect_error("thresholds:\n  midline_bps: center\n  upper_bps: 1\n"
+                 "  lower_bps: 1\n", "must be a number or auto")
+    expect_error("thresholds:\n  midline_bps: auto\n  upper_bps: 1\n"
+                 "  lower_bps: 1\n  midline_window_min: 0\n",
+                 "midline_window_min must be > 0")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

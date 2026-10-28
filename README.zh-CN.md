@@ -59,6 +59,12 @@ midline − lower  ────────────────────�
 策略**：若真实溢价中枢是 0 而你填了 5，机器人会整天以公允价买入 Entropy。
 先测量、再交易——数据采集器和分析工具就是为此而生。
 
+`midline_bps: auto` 让中枢跟随市场：取实时中间价溢价的时间加权 EMA，时间常数
+为 `midline_window_min`（默认 60 分钟）。启动时用采集器最近一个窗口的分钟数据
+预热，历史不足 `midline_warmup_min`（默认 10 分钟）时不交易。区间跟着溢价移动，
+两个方向都会持续触发，仓位来回周转，不会单边顶在上限。溢价有趋势时中枢会落后，
+仍可能单边加仓，所以请保留库存阶梯。
+
 ## 快速开始
 
 ```bash
@@ -151,8 +157,10 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 
 | 键 | 含义 | 默认值 |
 |---|---|---|
-| `thresholds.midline_bps` | 溢价中枢（必须实测！） | — |
+| `thresholds.midline_bps` | 溢价中枢（必须实测！），或 `auto` | — |
 | `thresholds.upper_bps` / `lower_bps` | 入场带宽（> 0） | — |
+| `thresholds.midline_window_min` | 自动中枢 EMA 时间常数（分钟） | 60 |
+| `thresholds.midline_warmup_min` | 自动中枢开始交易前需要的历史（分钟） | 10 |
 | `entropy.dex` | Entropy 在 Hyperliquid 上的 dex 名 | `io` |
 | `*.taker_fee_bps` | 各所吃单费 | 0.0（tradexyz 对冲腿：1.0） |
 | `*.max_position_usd` | 各所持仓上限 | 1000 |
@@ -312,7 +320,7 @@ tests/                   python3 -m pytest tests/
 ## 已知风险
 
 - **中枢填错就是亏钱策略。** 溢价中枢会漂移，请定期重新测量并保持
-  `config.yaml` 与市场同步。
+  `config.yaml` 与市场同步，或使用 `midline_bps: auto`。
 - **USDG 基差**（`lighter-rh`）：对冲腿以 USDG 计价，持续溢价中有
   一部分是稳定币本身的基差；midline 吸收其水平，但 USDG 的*变动*是真实盈亏。
 - **资金费**：两个交易所、两套独立的资金费率，持仓成本未建模——仓位上限

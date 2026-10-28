@@ -135,6 +135,71 @@ def test_scan_fires_buy_entropy_below_band():
     assert buy.key == "entropy" and sell.key == "hedge"
 
 
+def make_auto_engine(recorder_csv=None, warmup_min=10.0, window_min=60.0):
+    cfg = make_cfg(midline="auto", upper=4.0, lower=3.0)
+    cfg.midline_warmup_min, cfg.midline_window_min = warmup_min, window_min
+    if recorder_csv:
+        cfg.recorder_csv = recorder_csv
+    eng = Engine(cfg)
+    eng.entropy = StubVenue("entropy", "ENTROPY")
+    eng.hedge = StubVenue("hedge", "RH")
+    eng.venues = {"entropy": eng.entropy, "hedge": eng.hedge}
+    eng._step, eng._min_base, eng._min_notional = 1e-4, 1e-4, 10.0
+    return eng
+
+
+def test_fixed_midline_property_reads_config():
+    eng = make_engine(midline=5.0)
+    assert eng.midline == 5.0
+    eng.cfg.midline_bps = -2.0
+    assert eng.midline == -2.0
+
+
+def test_auto_midline_blocks_trading_until_warm():
+    import time
+    eng = make_auto_engine(warmup_min=10.0)
+    eng.entropy.set_book(100.14, 100.16)   # far above any band
+    eng.hedge.set_book(99.99, 100.01)
+    assert eng.midline is None and run_scan(eng) is None
+    now = time.time()
+    eng.center.update(now - 700, 15.0)     # warm for 700 s > 600 s
+    eng.center.update(now, 15.0)
+    approx(eng.midline, 15.0)
+    # premium ~+15 sits on the auto midline: inside the band, no trade
+    assert run_scan(eng) is None
+
+
+def test_auto_midline_band_follows_the_center():
+    import time
+    eng = make_auto_engine(warmup_min=0.0)
+    eng.center.update(time.time(), -2.0)   # basis center at -2 bps
+    approx(eng._eff_threshold(eng.hedge, eng.entropy), -2.0 + 4.0)
+    approx(eng._eff_threshold(eng.entropy, eng.hedge), 3.0 + 2.0)
+    # entropy ask 7 bps under hedge bid: clears lower - midline = 5 -> buy
+    eng.entropy.set_book(99.90, 99.92)
+    eng.hedge.set_book(99.99, 100.01)
+    best = run_scan(eng)
+    assert best is not None and best[0].key == "entropy"
+
+
+def test_seed_center_uses_recent_minutes_only():
+    import time
+    now = int(time.time()) // 60 * 60
+    f = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False)
+    f.write("minute_ts,premium_mean_bps\n")
+    f.write(f"{now - 6 * 3600},50.0\n")          # outside the window
+    for i in range(30, 0, -1):
+        f.write(f"{now - 60 * i},-2.0\n")
+    f.write(f"{now - 120},bad\n")
+    f.close()
+    eng = make_auto_engine(recorder_csv=f.name, warmup_min=10.0)
+    assert eng._seed_center() == 30
+    approx(eng.center.value, -2.0)
+    assert eng.midline is not None              # 30 seeded minutes > warmup
+    missing = make_auto_engine(recorder_csv=f.name + ".nope")
+    assert missing._seed_center() == 0 and missing.midline is None
+
+
 def test_scan_respects_position_caps():
     eng = make_engine(midline=0.0, upper=1.0, lower=1.0)
     eng.entropy.set_book(100.14, 100.16)

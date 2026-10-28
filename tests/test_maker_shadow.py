@@ -134,6 +134,16 @@ def test_center_tracker_auto_and_fixed():
     assert f.value == -3.9 and f.ready(0.0)
 
 
+def test_center_tracker_gap_resets_and_seed():
+    c = ms.CenterTracker(None, tau_sec=100.0, warmup_sec=50.0,
+                         reset_gap_sec=100.0)
+    assert c.seed([(0.0, -2.0), (60.0, -2.0)]) == 2
+    assert c.ready(60.0) and c.value == -2.0
+    c.update(500.0, 3.0)                          # gap 440 s > 100 s
+    assert c.value == 3.0 and not c.ready(500.0)  # restarted, warming
+    assert c.ready(550.0)
+
+
 def test_trade_feed_dedupes_and_maps_taker_side():
     got = []
     feed = ms.RHTradeFeed("RH", "", 32, lambda *a: got.append(a))

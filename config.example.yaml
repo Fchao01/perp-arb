@@ -40,10 +40,19 @@
 #     python3 tools/analyze.py --csv logs/sndk/minutes.csv
 # 两个方向的门槛都已扣除手续费（引擎会在此之上另加手续费），因此一次完整往返
 # 扣费后净赚 >= upper + lower bps。
+#
+# midline_bps: auto follows the market instead: a time-weighted EMA of the
+# live mid premium (time constant midline_window_min), seeded on start from
+# the recorder's minute bars; no trades until midline_warmup_min of history.
+# midline_bps: auto 让中枢跟随市场：实时中间价溢价的时间加权 EMA（时间常数
+# midline_window_min），启动时用采集的分钟数据预热；历史不足
+# midline_warmup_min 时不交易。
 thresholds:
-  midline_bps: 0.0     # persistent premium center / 溢价长期中枢
+  midline_bps: 0.0     # persistent premium center, or auto / 溢价长期中枢，或 auto
   upper_bps: 4.0       # entry above midline: sell entropy / 中枢上方入场带宽
   lower_bps: 4.0       # entry below midline: buy entropy / 中枢下方入场带宽
+  # midline_window_min: 60   # auto midline EMA time constant / 自动中枢时间常数（分钟）
+  # midline_warmup_min: 10   # history before trading / 开始交易前需要的历史（分钟）
 
 # ======================== VENUES / 交易所参数 ==============================
 # Optional overrides for the selected primary venue. When --primary entropy,

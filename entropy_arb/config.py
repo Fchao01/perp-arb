@@ -8,7 +8,7 @@ default (RH); --hedge defaults to Lighter mainnet. --symbol is required.
 Every YAML key is validated against the schema below, so a typo is an error
 rather than a setting that silently does nothing.
 
-Threshold model (fixed numbers the user derives from recorded minute data):
+Threshold model (numbers the user derives from recorded minute data):
 
     premium_bps = (entropy_price / hedge_price - 1) * 10_000
 
@@ -19,6 +19,11 @@ Threshold model (fixed numbers the user derives from recorded minute data):
 
     Both hurdles are net of both venues' taker fees, so a full round trip
     nets >= (upper_bps + lower_bps) after fees by construction.
+
+    midline_bps: auto replaces the fixed midline with a time-weighted EMA
+    of the live mid premium (time constant midline_window_min), so the
+    band follows the premium instead of pinning one direction when the
+    basis drifts away from a hardcoded center.
 """
 from __future__ import annotations
 
@@ -114,8 +119,8 @@ class Config:
     hedge_venue: str
     entropy: VenueConf
     hedge: VenueConf
-    # thresholds (the whole signal)
-    midline_bps: float
+    # thresholds (the whole signal); midline_bps is None when midline_auto
+    midline_bps: Optional[float]
     upper_bps: float
     lower_bps: float
     # sizing
@@ -155,6 +160,10 @@ class Config:
     hl_ws_url: str = HL_WS_URL
     primary_venue: str = "lighter-rh"
     telegram: TelegramConf = field(default_factory=TelegramConf)
+    # auto midline: EMA time constant, and how long it must run before trading
+    midline_auto: bool = False
+    midline_window_min: float = 60.0
+    midline_warmup_min: float = 10.0
 
     @property
     def creds_complete(self) -> bool:
@@ -172,9 +181,11 @@ class Config:
 # Schema: nested dict of key -> type (or nested dict). Unknown keys are errors.
 _SCHEMA: Dict[str, Any] = {
     "thresholds": {
-        "midline_bps": float,
+        "midline_bps": "float|auto",
         "upper_bps": float,
         "lower_bps": float,
+        "midline_window_min": float,
+        "midline_warmup_min": float,
     },
     "entropy": {
         "dex": str,
@@ -260,6 +271,11 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
         elif want is str:
             if not isinstance(val, str):
                 raise ConfigError(f"'{here}' must be a string, got {val!r}")
+        elif want == "float|auto":
+            if not (val == "auto" or (isinstance(val, (int, float))
+                                      and not isinstance(val, bool))):
+                raise ConfigError(f"'{here}' must be a number or auto, "
+                                  f"got {val!r} / 必须是数字或 auto")
 
 
 def _get(d: dict, section: str, key: str, default):
@@ -333,6 +349,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if upper <= 0 or lower <= 0:
         raise ConfigError("thresholds.upper_bps and lower_bps must be > 0 "
                           "(the round trip nets upper+lower bps after fees)")
+    midline_auto = thr["midline_bps"] == "auto"
+    midline_window = float(thr.get("midline_window_min", 60.0))
+    midline_warmup = float(thr.get("midline_warmup_min", 10.0))
+    if midline_window <= 0 or midline_warmup < 0:
+        raise ConfigError("thresholds.midline_window_min must be > 0 and "
+                          "midline_warmup_min >= 0 / 窗口必须大于 0，预热不能为负")
 
     take_fraction = float(_get(raw, "sizing", "take_fraction", 0.5))
     if not 0.0 < take_fraction <= 1.0:
@@ -404,7 +426,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge=hedge,
         primary_venue=primary_venue,
         telegram=telegram,
-        midline_bps=float(thr["midline_bps"]),
+        midline_bps=None if midline_auto else float(thr["midline_bps"]),
+        midline_auto=midline_auto,
+        midline_window_min=midline_window,
+        midline_warmup_min=midline_warmup,
         upper_bps=upper,
         lower_bps=lower,
         take_fraction=take_fraction,

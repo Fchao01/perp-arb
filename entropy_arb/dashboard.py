@@ -76,6 +76,8 @@ _ZH = {
         "信号 —— 可成交溢价 vs 完整门槛（含手续费，● = 已武装）",
     "mid premium ": "中间价溢价 ",
     "   midline ": "   中枢 ",
+    "warming up": "预热中",
+    " (auto)": "（自动）",
     "   band ": "   区间 ",
     "SELL entropy → buy {h}": "卖出 entropy → 买入 {h}",
     "SELL {p} → buy {h}": "卖出 {p} → 买入 {h}",
@@ -308,11 +310,16 @@ class Dashboard:
         return Panel(g, title=self._t("session"), box=box.ROUNDED,
                      padding=(0, 1))
 
-    def _dir_row(self, t: Table, label: str, buy, sell, hurdle_bps: float,
-                 armed_key: str) -> None:
+    def _dir_row(self, t: Table, label: str, buy, sell,
+                 hurdle_bps: Optional[float], armed_key: str) -> None:
         """One direction: executable premium vs its full hurdle (fees and
-        inventory surcharge included)."""
+        inventory surcharge included). hurdle_bps is None while the auto
+        midline warms up."""
         eng = self.eng
+        if hurdle_bps is None:
+            t.add_row(label, Text("—", style="dim"), Text("—", style="dim"),
+                      Text("—", style="dim"), "")
+            return
         ba, sb = buy.book.best_ask(), sell.book.best_bid()
         hurdle = (hurdle_bps + buy.fee_bps + sell.fee_bps
                   + eng._inv_add_bps(buy, sell))
@@ -336,11 +343,17 @@ class Dashboard:
         head.append(self._t("mid premium "), style="dim")
         head.append(f"{prem:+.2f} bps" if prem is not None else "—",
                     style="bold cyan")
+        midline = eng.midline
         head.append(self._t("   midline "), style="dim")
-        head.append(f"{cfg.midline_bps:+.2f}")
-        head.append(self._t("   band "), style="dim")
-        head.append(f"[{cfg.midline_bps - cfg.lower_bps:+.2f} … "
-                    f"{cfg.midline_bps + cfg.upper_bps:+.2f}]")
+        if midline is None:
+            head.append(self._t("warming up"), style="yellow")
+        else:
+            head.append(f"{midline:+.2f}")
+            if cfg.midline_auto:
+                head.append(self._t(" (auto)"), style="dim")
+            head.append(self._t("   band "), style="dim")
+            head.append(f"[{midline - cfg.lower_bps:+.2f} … "
+                        f"{midline + cfg.upper_bps:+.2f}]")
         t = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 1))
         t.add_column(self._t("direction"))
         t.add_column(self._t("exec prem bps"), justify="right")
@@ -350,10 +363,12 @@ class Dashboard:
         primary_label = "entropy" if eng.entropy.name == "ENTROPY" else eng.entropy.name
         self._dir_row(t, self._t("SELL {p} → buy {h}", p=primary_label, h=eng.hedge.name),
                       eng.hedge, eng.entropy,
-                      cfg.midline_bps + cfg.upper_bps, "sell_entropy")
+                      None if midline is None else midline + cfg.upper_bps,
+                      "sell_entropy")
         self._dir_row(t, self._t("BUY {p} → sell {h}", p=primary_label, h=eng.hedge.name),
                       eng.entropy, eng.hedge,
-                      cfg.lower_bps - cfg.midline_bps, "buy_entropy")
+                      None if midline is None else cfg.lower_bps - midline,
+                      "buy_entropy")
         return Panel(Group(head, t),
                      title=self._t("signal — executable premium vs full "
                                    "hurdle incl. fees (● = armed)"),

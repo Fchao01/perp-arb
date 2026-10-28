@@ -110,6 +110,20 @@ def test_renders_key_numbers():
     assert "+1.00" in out
 
 
+def test_renders_auto_midline():
+    eng = make_engine()
+    eng.cfg.midline_auto, eng.cfg.midline_bps = True, None
+    eng.entropy.set_book(100.14, 100.16)
+    eng.hedge.set_book(99.99, 100.01)
+    out = render(eng)
+    assert "warming up" in out and "render error" not in out
+    eng.center.warmup = 0.0
+    eng.center.update(time.time(), 2.0)
+    out = render(eng)
+    assert "(auto)" in out and "+6.00" in out      # 2 + upper 4
+    assert "（自动）" in render(eng, lang="zh")
+
+
 def test_renders_in_chinese():
     eng = make_engine()
     eng.entropy.set_book(100.14, 100.16)
