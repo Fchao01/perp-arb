@@ -270,6 +270,23 @@ python3 tools/edge_lifetime.py collect --symbol SNDK --config sndk.yaml
 python3 tools/edge_lifetime.py report --csv logs/sndk/edge_episodes.csv
 ```
 
+## Maker shadow simulation (read-only)
+
+`tools/maker_shadow.py` tests the alternative to taking stale quotes: being
+the RH maker. It shadow-quotes both sides of the primary around the hedge
+venue's mid plus the premium center (fixed, or an EMA with
+`--center-bps auto`), keeps the quotes with the exchange's place/cancel
+latencies and a per-minute action budget, fills them from RH's public trade
+stream, and prices a taker hedge on the other venue. Several half-spreads run
+at once. The report shows fills per hour, edge against the center, session
+mark-to-market, 1/5/30 s markouts (negative = being picked off) and who took
+the quotes. Nothing is sent; run it on the bot's server.
+
+```bash
+python3 tools/maker_shadow.py collect --symbol SNDK --config sndk.yaml --half-spread-bps 2,3,4,6
+python3 tools/maker_shadow.py report --dir logs/sndk
+```
+
 ## How execution works
 
 - Both legs are **taker** orders sent concurrently: Lighter market orders
@@ -312,6 +329,7 @@ entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
 tools/analyze.py         minutes.csv -> suggested thresholds
 tools/edge_lifetime.py   how long executable edges last (read-only)
+tools/maker_shadow.py    shadow RH maker quotes + hedge (read-only)
 tests/                   python3 -m pytest tests/
 ```
 

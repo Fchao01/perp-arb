@@ -244,6 +244,21 @@ python3 tools/edge_lifetime.py collect --symbol SNDK --config sndk.yaml
 python3 tools/edge_lifetime.py report --csv logs/sndk/edge_episodes.csv
 ```
 
+## 挂单影子模拟（只读）
+
+`tools/maker_shadow.py` 用来验证"在 RH 挂单"这条路：以对冲所中间价加溢价
+中心（固定值，或 `--center-bps auto` 自动跟随）为基准，在 RH 模拟挂双边单，
+按交易所的挂单/撤单延迟和每分钟操作上限维护报价，用 RH 公开成交判断是否
+会被吃到，再按对冲所盘口模拟吃单对冲。可同时测试多个半价差。report 给出
+每小时成交数、相对溢价中心的盈利、按盘口计价的总盈亏、成交后 1/5/30 秒
+价格走势（为负说明被挑单）以及吃单方是谁。不下任何单，请在机器人所在的
+服务器上运行。
+
+```bash
+python3 tools/maker_shadow.py collect --symbol SNDK --config sndk.yaml --half-spread-bps 2,3,4,6
+python3 tools/maker_shadow.py report --dir logs/sndk
+```
+
 ## 执行机制
 
 - 两条腿**同时发出吃单**：Lighter 用带均价保护的市价单，在鉴权 websocket
@@ -281,6 +296,7 @@ entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
 tools/analyze.py         minutes.csv -> 阈值建议
 tools/edge_lifetime.py   价差能持续多久（只读）
+tools/maker_shadow.py    RH 挂单影子模拟（只读）
 tests/                   python3 -m pytest tests/
 ```
 
