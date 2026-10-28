@@ -237,6 +237,17 @@ position could not be fully attributed to a fill observed by this process.
 Use `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` to print
 per-leg and pair latency percentiles and the share under a 350ms target.
 
+`tools/leg_report.py` reads the same files to explain misses: it sorts
+executions by outcome (both filled, primary missed, hedge missed, ...),
+measures each leg's fill against its planned price, compares planned with
+captured edge, adds the repair hedges' P&L, and splits all of it by planned
+premium, by which venue's book updated last before the decision, by hour and
+by day:
+
+```bash
+python3 tools/leg_report.py --csv logs/sndk/trades.csv --hedges logs/sndk/hedges.csv
+```
+
 ## Read-only all-market screener and dashboard
 
 `tools/market_screener.py` independently observes common active RH/Lighter
@@ -330,6 +341,7 @@ entropy_arb/recorder.py  1-minute orderbook bars
 tools/analyze.py         minutes.csv -> suggested thresholds
 tools/edge_lifetime.py   how long executable edges last (read-only)
 tools/maker_shadow.py    shadow RH maker quotes + hedge (read-only)
+tools/leg_report.py      trades.csv -> why legs miss / fill off plan
 tests/                   python3 -m pytest tests/
 ```
 

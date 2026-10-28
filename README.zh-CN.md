@@ -217,6 +217,14 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 可用 `python3 tools/analyze_trades.py --csv logs/{symbol}/trades.csv` 输出每条腿和双腿总耗时的
 均值、P50、P95、P99，以及低于 350ms 目标的比例。
 
+`tools/leg_report.py` 用同样的文件分析漏单：把每次执行分成两腿都成交、主所漏单、
+对冲所漏单等几类，计算每条腿成交价相对计划价的偏差，对比计划价差和实际价差，
+加上补单盈亏，并按计划价差大小、决策前哪边盘口最后更新、小时和日期拆分：
+
+```bash
+python3 tools/leg_report.py --csv logs/sndk/trades.csv --hedges logs/sndk/hedges.csv
+```
+
 ## 全市场只读筛选与网页
 
 独立脚本扫描 RH 与 LIGHTER 共同活跃永续市场，不需要 `.env` 或私钥，不会下单。
@@ -297,6 +305,7 @@ entropy_arb/recorder.py  分钟级盘口数据采集
 tools/analyze.py         minutes.csv -> 阈值建议
 tools/edge_lifetime.py   价差能持续多久（只读）
 tools/maker_shadow.py    RH 挂单影子模拟（只读）
+tools/leg_report.py      trades.csv -> 漏单与成交偏差诊断
 tests/                   python3 -m pytest tests/
 ```
 
