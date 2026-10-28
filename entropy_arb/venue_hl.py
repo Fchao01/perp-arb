@@ -180,7 +180,10 @@ class HLVenue:
         return Cloid.from_int(self._cloid)
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
+                         reduce_only: bool = False,
+                         limit_ioc: bool = True) -> dict:
+        # every HL order is already an IOC limit; limit_ioc only exists for
+        # interface parity with the Lighter venue
         assert self.account is not None and self.asset_id >= 0
         started_mono = time.monotonic()
         started_ts = time.time()

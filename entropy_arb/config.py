@@ -35,6 +35,7 @@ HL_WS_URL = "wss://api.hyperliquid.xyz/ws"   # official ws — the only HL feed 
 
 HEDGE_VENUES = ("lighter", "lighter-rh", "tradexyz")
 PRIMARY_VENUES = ("light-rh", "lighter-rh", "lighter", "entropy", "tradexyz")
+LEAD_VENUES = ("none", "primary", "hedge")
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,8 @@ class Config:
     settle_timeout_sec: float
     leg_slippage_bps: float
     hedge_slippage_bps: float
+    lead_venue: str
+    lead_slippage_bps: float
     net_tolerance_base: float
     max_consecutive_errors: int
     rate_limit_pause_sec: float
@@ -205,6 +208,8 @@ _SCHEMA: Dict[str, Any] = {
         "settle_timeout_sec": float,
         "leg_slippage_bps": float,
         "hedge_slippage_bps": float,
+        "lead_venue": str,
+        "lead_slippage_bps": float,
         "net_tolerance_base": float,
         "max_consecutive_errors": int,
         "rate_limit_pause_sec": float,
@@ -335,6 +340,14 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
                           "more than the profitable depth loses money on the "
                           "tail / 必须在 (0, 1] 之间")
 
+    lead_venue = str(_get(raw, "execution", "lead_venue", "none"))
+    if lead_venue not in LEAD_VENUES:
+        raise ConfigError(f"execution.lead_venue must be one of {list(LEAD_VENUES)}, "
+                          f"got {lead_venue!r} / 必须是 {list(LEAD_VENUES)} 之一")
+    lead_slippage = float(_get(raw, "execution", "lead_slippage_bps", 0.0))
+    if lead_slippage < 0:
+        raise ConfigError("execution.lead_slippage_bps must be >= 0 / 不能为负数")
+
     # Keep the internal "entropy" slot and signal keys for compatibility;
     # it now holds whichever primary venue is selected.
     primary_settings = dict(raw.get("entropy") or {}) if primary_venue == "entropy" else {}
@@ -404,6 +417,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         settle_timeout_sec=float(_get(raw, "execution", "settle_timeout_sec", 5.0)),
         leg_slippage_bps=float(_get(raw, "execution", "leg_slippage_bps", 50.0)),
         hedge_slippage_bps=float(_get(raw, "execution", "hedge_slippage_bps", 20.0)),
+        lead_venue=lead_venue,
+        lead_slippage_bps=lead_slippage,
         net_tolerance_base=float(_get(raw, "execution", "net_tolerance_base", 0.001)),
         max_consecutive_errors=int(_get(raw, "execution", "max_consecutive_errors", 3)),
         rate_limit_pause_sec=float(_get(raw, "execution", "rate_limit_pause_sec", 10.0)),

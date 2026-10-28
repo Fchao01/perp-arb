@@ -57,6 +57,20 @@ def test_minimal_defaults():
     assert cfg.recorder_enabled is True
 
 
+def test_lead_venue_option():
+    cfg = load(MINIMAL)
+    assert cfg.lead_venue == "none" and cfg.lead_slippage_bps == 0.0
+    cfg = load(MINIMAL + "execution:\n  lead_venue: primary\n"
+               "  lead_slippage_bps: 1.5\n")
+    assert cfg.lead_venue == "primary" and cfg.lead_slippage_bps == 1.5
+    for bad in ("  lead_venue: rh\n", "  lead_slippage_bps: -1\n"):
+        try:
+            load(MINIMAL + "execution:\n" + bad)
+        except ConfigError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+
+
 def test_tradexyz_hedge():
     cfg = load(MINIMAL, hedge="tradexyz")
     assert cfg.hedge.kind == "hl" and cfg.hedge.hl_dex == "xyz"

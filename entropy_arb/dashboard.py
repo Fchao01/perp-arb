@@ -378,7 +378,8 @@ class Dashboard:
                      footer=_usd(sum(fills) if fills else None))
         t.add_column(self._t("status"))
         for r in reversed(rows):
-            style = "green" if r["ok"] else "bold red"
+            style = ("green" if r["ok"] else
+                     "dim" if r.get("miss") else "bold red")
             t.add_row(time.strftime("%H:%M:%S", time.localtime(r["ts"])),
                       r["direction"], f"{r['qty']:.6g}",
                       f"${r['notional']:,.0f}", f"{r['prem_bps']:+.1f}",

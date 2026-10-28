@@ -274,8 +274,12 @@ class LighterVenue:
         return self._coi
 
     async def send_taker(self, *, is_buy: bool, qty: float, limit_px: float,
-                         reduce_only: bool = False) -> dict:
-        """Market order with avg-price protection; settle via account ws."""
+                         reduce_only: bool = False,
+                         limit_ioc: bool = False) -> dict:
+        """Market order with avg-price protection; settle via account ws.
+
+        limit_ioc sends an IOC limit instead: every fill is at or better than
+        limit_px (worst price, not average), the rest is canceled."""
         assert self.signer is not None
         from lighter import SignerClient
         started_mono = time.monotonic()
@@ -312,7 +316,8 @@ class LighterVenue:
                 base_amount=base_amount,
                 price=price,
                 is_ask=not is_buy,
-                order_type=SignerClient.ORDER_TYPE_MARKET,
+                order_type=(SignerClient.ORDER_TYPE_LIMIT if limit_ioc
+                            else SignerClient.ORDER_TYPE_MARKET),
                 time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
                 reduce_only=reduce_only,
                 order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,

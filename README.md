@@ -169,6 +169,7 @@ the selected primary; for Entropy it overrides legacy `entropy:` settings. Full 
 | `sizing.max_order_notional_usd` | per-slice cap | 500 |
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
+| `execution.lead_venue` / `lead_slippage_bps` | sequential execution: which leg goes first as a tight IOC limit | `none` / 0 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
 | `recorder.*` | minute-data recorder | on, `logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | Rich dashboard on a tty; durable log file in all modes | on, `logs/{symbol}/engine.log` |
@@ -254,12 +255,35 @@ inventory, forced exits and profit concentration. Shadow results are not actual
 PnL or fill probabilities; funding and contract equivalence require review.
 See the [usage and assumptions guide](docs/market_screener.zh-CN.md).
 
+## Edge lifetime (read-only)
+
+`tools/edge_lifetime.py` watches the same two books as the bot, with the same
+config, fees, hurdle and sizing, and records every episode in which an
+executable edge exists: how many milliseconds it lasts, which venue's update
+opened and closed it, and the excess still left at 50 ms ... 2 s. The report
+shows how many edges are still there when an order lands, with and without a
+persistence gate. It never loads credentials or sends orders. Run it on the
+same server as the bot — network location is what it measures.
+
+```bash
+python3 tools/edge_lifetime.py collect --symbol SNDK --config sndk.yaml
+python3 tools/edge_lifetime.py report --csv logs/sndk/edge_episodes.csv
+```
+
 ## How execution works
 
 - Both legs are **taker** orders sent concurrently: Lighter market orders
   with average-price protection settling on the authenticated account
   websocket; Hyperliquid IOC limits settling synchronously (with
   orderStatus polling for unknown outcomes).
+- **Sequential mode** (`lead_venue: primary` or `hedge`): the lead leg goes
+  first as an IOC limit at the planned price (plus `lead_slippage_bps`), so
+  it only fills while the quoted edge still exists. The other leg is sent
+  only for the size the lead filled; a lead miss sends nothing. Use it when
+  one venue's fills land far from its book. It adds one order round trip of
+  latency to the follower leg.
+- A leg filling more than the other counts as an execution problem toward
+  `max_consecutive_errors`; trades and expected edge count matched size only.
 - A **persistence gate** (`premium_persist_sec`) arms each direction and only
   fires if the edge survives — one-tick phantoms are filtered.
 - **Inventory ladder**: past `floor_frac` of a venue's cap, adding to the
@@ -287,6 +311,7 @@ entropy_arb/engine.py    the two-venue strategy loop
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
 tools/analyze.py         minutes.csv -> suggested thresholds
+tools/edge_lifetime.py   how long executable edges last (read-only)
 tests/                   python3 -m pytest tests/
 ```
 

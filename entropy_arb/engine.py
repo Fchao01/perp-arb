@@ -58,6 +58,8 @@ HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
                 "total_latency_ms", "close_pnl_usd", "source_trade_ids",
                 "residual_after"]
 BALANCE_POLL_SEC = 30.0
+# status of a follower leg that sequential mode deliberately did not send
+NOT_SENT = "not-sent"
 
 
 class Engine:
@@ -302,6 +304,13 @@ class Engine:
             base = self.cfg.lower_bps - self.cfg.midline_bps
         return base + self._inv_add_bps(buy, sell)
 
+    def _lead_leg(self, buy, sell):
+        """The venue sent first in sequential mode, or None (concurrent)."""
+        key = {"primary": "entropy", "hedge": "hedge"}.get(self.cfg.lead_venue)
+        if key is None:
+            return None
+        return buy if buy.key == key else sell
+
     def _headroom(self, buy, sell, ref_px: float) -> float:
         hb = buy.cap_usd - buy.position * ref_px
         hs = sell.cap_usd + sell.position * ref_px
@@ -488,14 +497,15 @@ class Engine:
         slip = cfg.leg_slippage_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
-        self._record_send(buy)
-        self._record_send(sell)
-        async def send_leg(v, *, is_buy, limit_px):
+
+        async def send_leg(v, *, is_buy, qty, limit_px, limit_ioc=False):
+            self._record_send(v)
             dispatch_mono = time.monotonic()
             dispatch_ts = time.time()
             try:
-                info = await v.send_taker(is_buy=is_buy, qty=plan.qty,
-                                          limit_px=limit_px)
+                info = await v.send_taker(is_buy=is_buy, qty=qty,
+                                          limit_px=limit_px,
+                                          limit_ioc=limit_ioc)
             except Exception as exc:
                 info = {"status": "send-failed", "filled_base": 0.0,
                         "avg_px": None, "err": repr(exc),
@@ -508,9 +518,43 @@ class Engine:
                 dispatch_mono - decision_mono) * 1000.0
             return info
 
-        binfo, sinfo = await asyncio.gather(
-            send_leg(buy, is_buy=True, limit_px=buy_bound),
-            send_leg(sell, is_buy=False, limit_px=sell_bound))
+        lead = self._lead_leg(buy, sell)
+        if lead is None:
+            binfo, sinfo = await asyncio.gather(
+                send_leg(buy, is_buy=True, qty=plan.qty, limit_px=buy_bound),
+                send_leg(sell, is_buy=False, qty=plan.qty, limit_px=sell_bound))
+        else:
+            # Lead leg first as a tight IOC limit: it only fills while the
+            # quoted edge still exists. The follower then takes exactly the
+            # lead's fill with the normal leg slippage protection.
+            lead_buy = lead is buy
+            follow = sell if lead_buy else buy
+            lslip = cfg.lead_slippage_bps / 1e4
+            lead_bound = (
+                buy.px_round(plan.buy_limit * (1 + lslip), round_up=False)
+                if lead_buy else
+                sell.px_round(plan.sell_limit * (1 - lslip), round_up=True))
+            linfo = await send_leg(lead, is_buy=lead_buy, qty=plan.qty,
+                                   limit_px=lead_bound, limit_ioc=True)
+            fqty = floor_step(linfo["filled_base"], self._step)
+            follow_bound = sell_bound if lead_buy else buy_bound
+            skip = None
+            if linfo.get("unresolved"):
+                skip = "lead unresolved"
+            elif fqty <= 0:
+                skip = "lead missed"
+            elif (fqty < follow.min_base
+                  or fqty * follow_bound < follow.min_quote):
+                skip = f"lead fill {fqty:.6g} below {follow.name} minimum"
+            if skip is None:
+                finfo = await send_leg(follow, is_buy=not lead_buy, qty=fqty,
+                                       limit_px=follow_bound)
+            else:
+                log.info("[ARB] %s on %s (%s) — %s leg not sent", skip,
+                         lead.name, linfo["status"], follow.name)
+                finfo = {"status": NOT_SENT, "filled_base": 0.0,
+                         "avg_px": None, "err": None, "unresolved": False}
+            binfo, sinfo = (linfo, finfo) if lead_buy else (finfo, linfo)
         for v, info, side in ((buy, binfo, "buy"), (sell, sinfo, "sell")):
             if info.get("err"):
                 log.error("[%s] %s leg: %s", v.name, side, info["err"])
@@ -542,11 +586,16 @@ class Engine:
                  sell.name, sinfo["status"], sfill, plan.qty, matched, fill_edge,
                  binfo.get("total_latency_ms") or -1.0,
                  sinfo.get("total_latency_ms") or -1.0)
-        buy.last_traded_ts = sell.last_traded_ts = time.time()
+        for v, info in ((buy, binfo), (sell, sinfo)):
+            if info["status"] != NOT_SENT:
+                v.last_traded_ts = time.time()
 
         unresolved = binfo.get("unresolved") or sinfo.get("unresolved")
         hard_err = (binfo.get("err") is not None
                     or sinfo.get("err") is not None)
+        # one leg filled more than the other: the hedge has to cross a spread
+        # to repair it, so it counts as an execution problem, not a success
+        imbalanced = abs(bfill - sfill) > max(cfg.net_tolerance_base, 1e-12)
         rate_limited = False
         for v, info in ((buy, binfo), (sell, sinfo)):
             if str(info.get("err", "")).startswith("RATE_LIMITED"):
@@ -556,8 +605,8 @@ class Engine:
                 log.warning("[%s] margin rejection — collateral exhausted, "
                             "pausing venue", v.name)
                 self._mark_limited(v)
-        sent_ok = not hard_err and not unresolved
-        if sent_ok:
+        problem = hard_err or unresolved or imbalanced
+        if not problem:
             self.consec_errors = 0
         elif not rate_limited:
             self.consec_errors += 1
@@ -566,13 +615,16 @@ class Engine:
                 log.critical("HALTED after %d consecutive execution problems "
                              "— flatten manually and restart / 连续执行异常，"
                              "引擎已停止，请手动平仓后重启", self.consec_errors)
-        if sent_ok:
+        ok = not problem and matched > 0
+        if matched > 0:
+            # expected edge only for the size that actually filled on both legs
             self.trades += 1
-            self.total_exp_edge += plan.exp_edge_usd
+            self.total_exp_edge += plan.exp_edge_usd * matched / plan.qty
         self._record_trade(direction, plan,
                            None if unresolved else fill_edge,
-                           f"{binfo['status']}/{sinfo['status']}", sent_ok)
-        self._log_csv(direction, buy, sell, plan, sent_ok, bfill, sfill,
+                           f"{binfo['status']}/{sinfo['status']}", ok,
+                           miss=not problem and matched <= 0)
+        self._log_csv(direction, buy, sell, plan, ok, bfill, sfill,
                       binfo["status"], sinfo["status"], fill_edge, inv_bps,
                       trade_id, decision_ts, book_snapshot, binfo, sinfo)
         self.last_trade_ts = time.time()
@@ -611,13 +663,13 @@ class Engine:
             log.exception("could not build Telegram trade notification")
 
     def _record_trade(self, direction: str, plan: ArbPlan, fill_edge,
-                      status: str, ok: bool) -> None:
+                      status: str, ok: bool, miss: bool = False) -> None:
         self.recent_trades.append({
             "ts": time.time(), "direction": direction, "qty": plan.qty,
             "notional": plan.buy_notional,
             "prem_bps": plan.marginal_premium_bps,
             "exp": plan.exp_edge_usd, "fill": fill_edge, "status": status,
-            "ok": ok})
+            "ok": ok, "miss": miss})
 
     def _add_lot(self, venue, signed_qty: float, price: Optional[float],
                  fee_rate: float, trade_id: str) -> None:

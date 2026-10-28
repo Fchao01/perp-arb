@@ -9,14 +9,14 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from entropy_arb.book import OrderBook  # noqa: E402
+from entropy_arb.book import ArbPlan, OrderBook  # noqa: E402
 from entropy_arb.config import load_config  # noqa: E402
 from entropy_arb.engine import Engine  # noqa: E402
 
 NO_ENV = os.path.join(tempfile.gettempdir(), "entropy-arb-no-such.env")
 
 
-def make_cfg(midline=5.0, upper=4.0, lower=3.0):
+def make_cfg(midline=5.0, upper=4.0, lower=3.0, execution=""):
     f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     f.write(f"""
 thresholds:
@@ -25,6 +25,7 @@ thresholds:
   lower_bps: {lower}
 execution:
   premium_persist_sec: 0.0
+{execution}
 """)
     f.close()
     return load_config(f.name, NO_ENV,
@@ -143,6 +144,99 @@ def test_scan_respects_position_caps():
     eng.hedge.position = 100.0
     eng.hedge.cap_usd = 10000.0
     assert run_scan(eng) is None
+
+
+class OrderVenue(StubVenue):
+    """StubVenue that records orders and fills the given quantity."""
+
+    def __init__(self, key, label, fills):
+        super().__init__(key, label)
+        self.fills = list(fills)   # one result per order: qty, or a dict
+        self.orders = []
+        self.volume_usd = 0.0
+
+    def px_round(self, px, round_up):
+        return round(px, 2)
+
+    async def send_taker(self, **kw):
+        self.orders.append(kw)
+        r = self.fills.pop(0)
+        if isinstance(r, dict):
+            return r
+        return {"status": "filled" if r >= kw["qty"] else "canceled",
+                "filled_base": r, "avg_px": kw["limit_px"] if r else None,
+                "err": None, "unresolved": False}
+
+
+def run_execute(lead, rh_fills, lighter_fills, qty=1.0):
+    """sell RH (primary) / buy LIGHTER (hedge) at a 10 bps planned edge."""
+    cfg = make_cfg(execution=f"""  lead_venue: {lead}
+  lead_slippage_bps: 0.0
+  leg_slippage_bps: 10.0""")
+    cfg.trades_csv = os.path.join(tempfile.mkdtemp(), "trades.csv")
+    eng = Engine(cfg)
+    rh = OrderVenue("entropy", "RH", rh_fills)
+    lt = OrderVenue("hedge", "LIGHTER", lighter_fills)
+    eng.entropy, eng.hedge = rh, lt
+    eng.venues = {"entropy": rh, "hedge": lt}
+    eng._step = 1e-4
+    plan = ArbPlan(qty, 100.0, 100.1, 100.0 * qty, 100.1 * qty, qty,
+                   100.0 * qty, 10.0, 10.0, 0.0, 0.0)
+    unresolved = asyncio.run(eng._execute(lt, rh, plan))
+    return eng, rh, lt, unresolved
+
+
+def test_sequential_lead_fills_then_follower_takes_lead_fill():
+    eng, rh, lt, unresolved = run_execute("primary", [1.0], [1.0])
+    assert not unresolved
+    lead = rh.orders[0]
+    # lead: tight IOC limit at the planned price, no slippage allowance
+    assert lead["limit_ioc"] is True and lead["limit_px"] == 100.1
+    assert lead["is_buy"] is False and lead["qty"] == 1.0
+    # follower: same size, normal leg slippage protection
+    assert lt.orders[0]["qty"] == 1.0 and lt.orders[0]["limit_ioc"] is False
+    assert lt.orders[0]["limit_px"] == round(100.0 * 1.001, 2)
+    assert eng.trades == 1 and eng.consec_errors == 0
+    assert rh.position == -1.0 and lt.position == 1.0
+    assert eng.recent_trades[-1]["ok"]
+
+
+def test_sequential_lead_miss_sends_nothing_else():
+    eng, rh, lt, _ = run_execute("primary", [0.0], [])
+    assert len(rh.orders) == 1 and lt.orders == []
+    assert eng.trades == 0 and eng.total_exp_edge == 0.0
+    assert eng.consec_errors == 0           # a miss is not an execution fault
+    assert rh.position == lt.position == 0.0
+    assert eng.recent_trades[-1]["miss"]
+    assert lt.last_traded_ts == 0.0         # follower never touched
+
+
+def test_sequential_partial_lead_sizes_follower():
+    eng, rh, lt, _ = run_execute("primary", [0.4], [0.4])
+    assert lt.orders[0]["qty"] == 0.4
+    assert eng.trades == 1
+    # expected edge counted only for the matched size
+    assert abs(eng.total_exp_edge - 0.1 * 0.4) < 1e-9
+
+
+def test_sequential_unresolved_lead_skips_follower():
+    timeout = {"status": "timeout", "filled_base": 0.0, "avg_px": None,
+               "err": None, "unresolved": True}
+    eng, rh, lt, unresolved = run_execute("primary", [timeout], [])
+    assert unresolved and lt.orders == []
+    assert eng.consec_errors == 1
+
+
+def test_one_leg_fill_counts_as_execution_problem():
+    eng, rh, lt, _ = run_execute("primary", [1.0], [0.0])
+    assert eng.consec_errors == 1
+    assert not eng.recent_trades[-1]["ok"]
+    assert eng.trades == 0 and eng.total_exp_edge == 0.0
+    # concurrent mode: same rule, both legs sent at once
+    eng, rh, lt, _ = run_execute("none", [0.0], [1.0])
+    assert len(rh.orders) == len(lt.orders) == 1
+    assert rh.orders[0]["limit_ioc"] is False
+    assert eng.consec_errors == 1
 
 
 if __name__ == "__main__":

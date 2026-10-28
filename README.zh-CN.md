@@ -161,6 +161,7 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 | `sizing.max_order_notional_usd` | 单笔名义上限 | 500 |
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
+| `execution.lead_venue` / `lead_slippage_bps` | 顺序执行：哪条腿先用紧限价 IOC 下单 | `none` / 0 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |
 | `recorder.*` | 分钟数据采集器 | 开启，`logs/{symbol}/minutes.csv` |
 | `logging.dashboard` / `logging.file` | 终端仪表盘；所有模式都持续写入日志文件 | 开启，`logs/{symbol}/engine.log` |
@@ -230,11 +231,30 @@ python3 tools/market_screener.py serve --input logs/screener --port 8765
 影子往返不是实际成交收益，资金费和合约可比性仍需核验。
 详见 [使用方法与模型限制](docs/market_screener.zh-CN.md)。
 
+## 价差寿命测量（只读）
+
+`tools/edge_lifetime.py` 用与机器人相同的配置、手续费、阈值和下单规模观察
+同样的两个盘口，记录每一次可成交价差越过阈值的事件：持续多少毫秒、由哪个
+交易所的更新开启和结束、在 50 ms 到 2 s 各时间点还剩多少超额价差。report
+会给出订单落地时价差还在的比例，以及加持续性闸门后的效果。不读取密钥、不下单。
+请在运行机器人的同一台服务器上运行——它测的正是那台机器的网络位置。
+
+```bash
+python3 tools/edge_lifetime.py collect --symbol SNDK --config sndk.yaml
+python3 tools/edge_lifetime.py report --csv logs/sndk/edge_episodes.csv
+```
+
 ## 执行机制
 
 - 两条腿**同时发出吃单**：Lighter 用带均价保护的市价单，在鉴权 websocket
   上异步确认成交；Hyperliquid 用 IOC 限价单同步结算（结果未知时轮询
   orderStatus 兜底）。
+- **顺序执行**（`lead_venue: primary` 或 `hedge`）：先手腿以计划价格（加
+  `lead_slippage_bps`）发 IOC 限价单，只有价差仍在时才会成交；另一条腿只按
+  先手腿的实际成交量下单，先手腿没成交就什么都不发。适合某个交易所成交价
+  经常远离盘口的情况。代价是后手腿多一次下单往返的延迟。
+- 两条腿成交量不一致计为一次执行异常，累计到 `max_consecutive_errors`；
+  成交笔数和预期边际只按两边都成交的数量统计。
 - **持续性闸门**（`premium_persist_sec`）：信号先"武装"，持续存在才触发，
   过滤单 tick 的假信号。
 - **库存阶梯**：仓位超过上限的 `floor_frac` 后，同方向加仓需要线性递增的
@@ -260,6 +280,7 @@ entropy_arb/engine.py    双交易所策略主循环
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
 tools/analyze.py         minutes.csv -> 阈值建议
+tools/edge_lifetime.py   价差能持续多久（只读）
 tests/                   python3 -m pytest tests/
 ```
 
