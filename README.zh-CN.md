@@ -60,7 +60,10 @@ midline − lower  ────────────────────�
 先测量、再交易——数据采集器和分析工具就是为此而生。
 
 `midline_bps: auto` 让中枢跟随市场：取实时中间价溢价的时间加权 EMA，时间常数
-为 `midline_window_min`（默认 60 分钟）。启动时用采集器最近一个窗口的分钟数据
+为 `midline_window_min`（默认 60 分钟）。`python3 tools/analyze.py --csv
+logs/eth/minutes.csv --midline auto --min-band 1.0` 会在采集的分钟数据上回放
+这条中枢，给出对称门槛建议（不低于 `--min-band`，该值应取 `tools/leg_report.py`
+里主所腿的成交滑点）。启动时用采集器最近一个窗口的分钟数据
 预热，历史不足 `midline_warmup_min`（默认 10 分钟）时不交易。区间跟着溢价移动，
 两个方向都会持续触发，仓位来回周转，不会单边顶在上限。溢价有趋势时中枢会落后，
 仍可能单边加仓，所以请保留库存阶梯。

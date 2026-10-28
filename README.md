@@ -69,7 +69,11 @@ that is what the recorder and analyzer are for.
 
 `midline_bps: auto` takes the midline from the market instead: a
 time-weighted EMA of the live mid premium with a time constant of
-`midline_window_min` (default 60). On start it is seeded from the recorder's
+`midline_window_min` (default 60). `python3 tools/analyze.py --csv
+logs/eth/minutes.csv --midline auto --min-band 1.0` replays that midline over
+recorded minutes and suggests one symmetric band (never below `--min-band`,
+which should be the primary leg's fill slippage from `tools/leg_report.py`).
+On start it is seeded from the recorder's
 minute bars of the last window, and the bot does not trade until it has
 `midline_warmup_min` (default 10) of history. Because the band moves with the
 premium, both directions keep firing and the inventory turns over instead of

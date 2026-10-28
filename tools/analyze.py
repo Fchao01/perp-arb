@@ -8,22 +8,34 @@ and prints:
   * how often each candidate upper/lower band would have fired,
   * a ready-to-paste `thresholds:` snippet.
 
+With --midline auto the bands are measured against the same moving center
+the engine uses with `midline_bps: auto` (an EMA of the minute premium,
+replayed minute by minute) and the suggestion is one symmetric band.
+
 分析机器人自动采集的分钟级盘口数据，输出溢价分布、各档阈值的触发频率，
-以及可直接粘贴进 config.yaml 的 thresholds 建议值。
+以及可直接粘贴进 config.yaml 的 thresholds 建议值。加 --midline auto 时按
+引擎自动中枢（分钟溢价的 EMA，逐分钟回放）计算，并给出对称的门槛。
 
 Usage:
     python3 tools/analyze.py                    # logs/minutes.csv
     python3 tools/analyze.py --csv path.csv --hours 24 --min-samples 10
+    python3 tools/analyze.py --csv logs/eth/minutes.csv --midline auto --min-band 1.0
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import math
+import os
 import sys
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from entropy_arb.center import CenterTracker  # noqa: E402
+
 CANDIDATES = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+AUTO_CANDIDATES = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
 
 
 def pctl(sorted_vals: list, q: float) -> float:
@@ -57,7 +69,70 @@ def load_rows(path: str, hours: float, min_samples: int) -> list:
                 })
             except (KeyError, ValueError):
                 continue
+    rows.sort(key=lambda r: r["ts"])
     return rows
+
+
+def auto_rooms(rows: list, window_min: float, warmup_min: float,
+               fees: float) -> tuple:
+    """Executable room beyond the auto midline each minute, as the engine
+    would have seen it: the EMA center from the minutes before, never the
+    minute itself. Minutes before the warmup are skipped."""
+    window = window_min * 60.0
+    c = CenterTracker(None, window, warmup_min * 60.0, reset_gap_sec=window)
+    sell, buy, centers = [], [], []
+    for r in rows:
+        ts = r["ts"] + 60.0
+        if c.ready(ts):
+            m = c.value
+            centers.append(m)
+            sell.append(r["sell_max"] - m - fees)
+            buy.append(r["buy_max"] + m - fees)
+        c.update(ts, r["prem_mean"])
+    return sell, buy, centers
+
+
+def print_auto(rows: list, args) -> None:
+    sell, buy, centers = auto_rooms(rows, args.window_min, args.warmup_min,
+                                    args.fees_bps)
+    if not centers:
+        print("not enough history for the auto midline to warm up / "
+              "数据不够自动中枢预热", file=sys.stderr)
+        sys.exit(1)
+    n = len(centers)
+    cs = sorted(centers)
+    print(f"\nauto midline (EMA {args.window_min:g} min) over {n} minutes / "
+          f"自动中枢的变化范围: min {cs[0]:+.2f}  p50 {pctl(cs, 50):+.2f}  "
+          f"max {cs[-1]:+.2f}")
+    print(f"\nshare of minutes each symmetric band would have fired against "
+          f"the moving midline, after {args.fees_bps:.1f} bps fees / "
+          f"各档对称门槛触发的分钟占比:")
+    print(f"  {'band bps':>9} | {'SELL entropy':>12} | {'BUY entropy':>12}")
+    for h in AUTO_CANDIDATES:
+        s = sum(1 for x in sell if x >= h) / n
+        b = sum(1 for x in buy if x >= h) / n
+        print(f"  {h:>9.2f} | {s:>12.1%} | {b:>12.1%}")
+
+    # the widest band that still fires both ways in ~10% of minutes, but
+    # never narrower than --min-band (the primary leg's fill slippage)
+    room = min(pctl(sorted(sell), 90), pctl(sorted(buy), 90))
+    band = max(math.floor(room * 4) / 4, args.min_band)
+    print(f"""
+suggested starting point (both directions fire in ~10% of minutes; never
+below --min-band {args.min_band:g}) /
+建议起点（两个方向约 10% 的分钟触发；不低于 --min-band {args.min_band:g}）:
+
+thresholds:
+  midline_bps: auto
+  upper_bps: {band:g}
+  lower_bps: {band:g}
+  midline_window_min: {args.window_min:g}
+
+The band must exceed the primary leg's fill slippage: run tools/leg_report.py
+on this symbol's trades.csv and pass its primary p50 slip as --min-band. /
+门槛必须大于主所腿的成交滑点：用 tools/leg_report.py 查看该品种主所腿滑点
+中位数，作为 --min-band 传入。
+""")
 
 
 def main() -> None:
@@ -73,6 +148,16 @@ def main() -> None:
                         "pays both legs); recorded edges are pre-fee, so this "
                         "is subtracted before counting firings (default 0.0 — "
                         "pass ~1.0 with a tradexyz hedge)")
+    p.add_argument("--midline", choices=("fixed", "auto"), default="fixed",
+                   help="fixed: bands around the median premium (default); "
+                        "auto: bands around the engine's moving EMA midline")
+    p.add_argument("--window-min", type=float, default=60.0,
+                   help="auto midline EMA time constant (minutes)")
+    p.add_argument("--warmup-min", type=float, default=10.0,
+                   help="auto midline history needed before counting")
+    p.add_argument("--min-band", type=float, default=0.5,
+                   help="auto: smallest band to suggest (bps), e.g. the "
+                        "primary leg's median fill slippage")
     args = p.parse_args()
 
     try:
@@ -102,6 +187,10 @@ def main() -> None:
           f"median {median:+.2f}")
     print(f"  p5 {pctl(prem, 5):+.2f}   p25 {pctl(prem, 25):+.2f}   "
           f"p75 {pctl(prem, 75):+.2f}   p95 {pctl(prem, 95):+.2f}")
+
+    if args.midline == "auto":
+        print_auto(rows, args)
+        return
 
     midline = round(median, 1) or 0.0   # normalize -0.0
     # room beyond the midline that was actually executable each minute, net
