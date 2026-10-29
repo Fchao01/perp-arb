@@ -24,6 +24,7 @@ try:
 except ImportError:
     from websockets import connect as ws_connect  # type: ignore
 
+from . import fastjson
 from .book import OrderBook
 
 log = logging.getLogger("feeds")
@@ -102,7 +103,7 @@ class LighterBookFeed:
                     self._synced = False
                     async for raw in ws:
                         backoff = 1.0
-                        msg = json.loads(raw)
+                        msg = fastjson.loads(raw)
                         t = msg.get("type")
                         self.book.touch()
                         if t == "update/order_book":
@@ -183,7 +184,7 @@ class HLBookFeed:
                     ptask = asyncio.create_task(self._pinger(ws))
                     async for raw in ws:
                         backoff = 1.0
-                        self._on_frame(json.loads(raw))
+                        self._on_frame(fastjson.loads(raw))
                         if stop.is_set():
                             break
             except asyncio.CancelledError:

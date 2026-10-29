@@ -14,14 +14,28 @@ from typing import Dict, List, Optional, Tuple
 
 Level = Tuple[float, float]
 
+# sentinel: the cached best price must be recomputed from the dict
+_STALE = object()
+
 
 class OrderBook:
+    """Price -> size dicts per side, plus a cached best bid / best ask.
+
+    The caches make best_bid()/best_ask()/mid() O(1) on the hot path (every
+    book update triggers a strategy scan). They are maintained by the apply_*
+    and clear() methods, so mutate the books only through those methods.
+    A cache that cannot be updated incrementally (its level was removed) is
+    marked stale and recomputed from the dict on the next read.
+    """
+
     def __init__(self) -> None:
         self.bids: Dict[float, float] = {}
         self.asks: Dict[float, float] = {}
         self.ready = False
         self.last_update_ts = 0.0
         self.alive_ts = 0.0
+        self._best_bid = _STALE
+        self._best_ask = _STALE
 
     def touch(self) -> None:
         self.alive_ts = time.time()
@@ -29,6 +43,8 @@ class OrderBook:
     def clear(self) -> None:
         self.bids.clear()
         self.asks.clear()
+        self._best_bid = _STALE
+        self._best_ask = _STALE
         self.ready = False
 
     # ---- zkLighter snapshot + diff ----
@@ -36,13 +52,31 @@ class OrderBook:
         if snapshot:
             self.bids.clear()
             self.asks.clear()
-        for name, side in (("bids", self.bids), ("asks", self.asks)):
-            for lvl in ob.get(name) or []:
-                px, sz = float(lvl["price"]), float(lvl["size"])
-                if sz <= 0:
-                    side.pop(px, None)
-                else:
-                    side[px] = sz
+            self._best_bid = _STALE
+            self._best_ask = _STALE
+        bids, asks = self.bids, self.asks
+        bb, ba = self._best_bid, self._best_ask
+        for lvl in ob.get("bids") or []:
+            px, sz = float(lvl["price"]), float(lvl["size"])
+            if sz <= 0:
+                bids.pop(px, None)
+                if bb is not _STALE and px == bb:
+                    bb = _STALE
+            else:
+                bids[px] = sz
+                if bb is not _STALE and (bb is None or px > bb):
+                    bb = px
+        for lvl in ob.get("asks") or []:
+            px, sz = float(lvl["price"]), float(lvl["size"])
+            if sz <= 0:
+                asks.pop(px, None)
+                if ba is not _STALE and px == ba:
+                    ba = _STALE
+            else:
+                asks[px] = sz
+                if ba is not _STALE and (ba is None or px < ba):
+                    ba = px
+        self._best_bid, self._best_ask = bb, ba
         self.ready = True
         self.last_update_ts = time.time()
         self.touch()
@@ -53,6 +87,8 @@ class OrderBook:
                      for l in levels[0] if float(l["sz"]) > 0}
         self.asks = {float(l["px"]): float(l["sz"])
                      for l in levels[1] if float(l["sz"]) > 0}
+        self._best_bid = _STALE
+        self._best_ask = _STALE
         self.ready = True
         self.last_update_ts = time.time()
         self.touch()
@@ -64,15 +100,20 @@ class OrderBook:
         return sorted(self.asks.items())
 
     def best_bid(self) -> Optional[float]:
-        return max(self.bids) if self.bids else None
+        if self._best_bid is _STALE:
+            self._best_bid = max(self.bids) if self.bids else None
+        return self._best_bid
 
     def best_ask(self) -> Optional[float]:
-        return min(self.asks) if self.asks else None
+        if self._best_ask is _STALE:
+            self._best_ask = min(self.asks) if self.asks else None
+        return self._best_ask
 
     def mid(self) -> Optional[float]:
-        if not (self.bids and self.asks):
+        bb, ba = self.best_bid(), self.best_ask()
+        if bb is None or ba is None:
             return None
-        return (max(self.bids) + min(self.asks)) / 2.0
+        return (bb + ba) / 2.0
 
     def is_fresh(self, max_age_sec: float) -> bool:
         return self.ready and bool(self.bids) and bool(self.asks) and (
@@ -161,16 +202,21 @@ def plan_arb(buy_book: OrderBook, sell_book: OrderBook, *, threshold_bps: float,
     clears both venues' taker fees plus threshold_bps. Returns
     (ArbPlan | None, reason).
     """
-    asks = buy_book.sorted_asks()
-    bids = sell_book.sorted_bids()
-    if not asks or not bids:
+    best_ask = buy_book.best_ask()
+    best_bid = sell_book.best_bid()
+    if best_ask is None or best_bid is None:
         return None, "empty_book"
     threshold = threshold_bps / 1e4
     buy_fee = buy_fee_bps / 1e4
     sell_fee = sell_fee_bps / 1e4
-    top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
-    if bids[0][0] * (1.0 - sell_fee) < asks[0][0] * (1.0 + buy_fee) * (1.0 + threshold):
+    # Top-of-book check first: almost every scan ends here, so the full
+    # sort of both books (thousands of levels) is only paid when there is
+    # an edge to size.
+    if best_bid * (1.0 - sell_fee) < best_ask * (1.0 + buy_fee) * (1.0 + threshold):
         return None, "no_edge"
+    asks = buy_book.sorted_asks()
+    bids = sell_book.sorted_bids()
+    top_premium_bps = (bids[0][0] / asks[0][0] - 1.0) * 1e4
     q_max, q_max_notional = crossable_base(asks, bids, threshold, buy_fee, sell_fee)
     if q_max <= 0:
         return None, "no_edge"

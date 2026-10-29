@@ -27,6 +27,7 @@ import os
 import signal
 import sys
 
+from entropy_arb import fastjson
 from entropy_arb.config import HEDGE_VENUES, PRIMARY_VENUES, ConfigError, load_config
 from entropy_arb.engine import Engine
 
@@ -55,10 +56,29 @@ def setup_logging(level: str, log_file: str = None,
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
 
+def run_event_loop(coro, use_uvloop: bool = True):
+    """Run the bot's coroutine on uvloop when it is installed (a faster
+    drop-in asyncio event loop), otherwise on the standard asyncio loop."""
+    if use_uvloop:
+        try:
+            import uvloop
+        except ImportError:  # optional dependency
+            uvloop = None
+        if uvloop is not None:
+            if hasattr(uvloop, "run"):
+                return uvloop.run(coro)
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    return asyncio.run(coro)
+
+
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
                 log_buffer, lang: str) -> None:
-    eng = Engine(cfg, record_only=record_only)
     loop = asyncio.get_running_loop()
+    logging.getLogger("main").info(
+        "event loop: %s, websocket json: %s",
+        "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio",
+        fastjson.BACKEND)
+    eng = Engine(cfg, record_only=record_only)
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)
     if not use_dashboard:
@@ -106,6 +126,9 @@ def main() -> None:
                       help="force the Rich dashboard even without a tty")
     disp.add_argument("--no-dashboard", action="store_true",
                       help="plain console logs instead of the dashboard")
+    p.add_argument("--no-uvloop", action="store_true",
+                   help="use the standard asyncio event loop even when "
+                        "uvloop is installed / 不使用 uvloop")
     args = p.parse_args()
 
     try:
@@ -139,10 +162,11 @@ def main() -> None:
         setup_logging(cfg.log_level, log_file=cfg.log_file, console=True)
 
     try:
-        asyncio.run(amain(cfg, record_only=args.record_only,
-                          use_dashboard=use_dashboard, force_tty=force_tty,
-                          log_buffer=log_buffer,
-                          lang="zh" if args.cn else "en"))
+        run_event_loop(amain(cfg, record_only=args.record_only,
+                             use_dashboard=use_dashboard, force_tty=force_tty,
+                             log_buffer=log_buffer,
+                             lang="zh" if args.cn else "en"),
+                       use_uvloop=not args.no_uvloop)
     except RuntimeError as e:
         # startup failures (missing credentials, market not found, venue
         # unreachable) — a clean message, not a traceback
