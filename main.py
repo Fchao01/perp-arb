@@ -27,7 +27,6 @@ import os
 import signal
 import sys
 
-from entropy_arb import fastjson
 from entropy_arb.config import HEDGE_VENUES, PRIMARY_VENUES, ConfigError, load_config
 from entropy_arb.engine import Engine
 
@@ -75,9 +74,8 @@ async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
                 log_buffer, lang: str) -> None:
     loop = asyncio.get_running_loop()
     logging.getLogger("main").info(
-        "event loop: %s, websocket json: %s",
-        "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio",
-        fastjson.BACKEND)
+        "event loop: %s",
+        "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio")
     eng = Engine(cfg, record_only=record_only)
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)

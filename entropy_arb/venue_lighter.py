@@ -27,7 +27,6 @@ try:
 except ImportError:
     from websockets import connect as ws_connect  # type: ignore
 
-from . import fastjson
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import LighterBookFeed
@@ -107,7 +106,7 @@ class AccountOrdersFeed:
                                       ping_interval=15, ping_timeout=15) as ws:
                     async for raw in ws:
                         backoff = 1.0
-                        msg = fastjson.loads(raw)
+                        msg = json.loads(raw)
                         t = msg.get("type")
                         if t in ("subscribed/account_orders", "update/account_orders"):
                             if t.startswith("subscribed"):
