@@ -13,6 +13,7 @@ hides that behind the same result shape the HL venue returns:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -51,6 +52,9 @@ class AccountOrdersFeed:
         self.ready = asyncio.Event()
         self._pending: dict[int, asyncio.Future] = {}
         self._terminal: OrderedDict[int, dict] = OrderedDict()
+        # callbacks receiving every raw order update, open orders included
+        # (maker mode tracks partial fills of resting quotes through this)
+        self.listeners: list = []
 
     def watch(self, coi: int) -> asyncio.Future:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -76,6 +80,11 @@ class AccountOrdersFeed:
     def _handle_orders(self, msg: dict) -> None:
         for lst in (msg.get("orders") or {}).values():
             for o in lst or []:
+                for cb in self.listeners:
+                    try:
+                        cb(o)
+                    except Exception:
+                        log.exception("[%s] order listener failed", self.name)
                 status = str(o.get("status", ""))
                 if status in OPEN_STATUSES:
                     continue
@@ -357,6 +366,93 @@ class LighterVenue:
                         self.name, coi, self.settle_timeout)
             return finish({"status": "timeout", "filled_base": 0.0,
                            "avg_px": None, "err": None, "unresolved": True})
+
+    # ------------------------------------------------------- resting orders
+
+    @staticmethod
+    def _tx_error(resp, err) -> Optional[str]:
+        if err is not None:
+            msg = str(err)
+        elif (getattr(resp, "code", 200) or 200) != 200:
+            msg = (f"tx rejected code={resp.code} "
+                   f"msg={getattr(resp, 'message', None)}")
+        else:
+            return None
+        if "rate limit" in msg.lower() or "(429)" in msg:
+            msg = "RATE_LIMITED: " + msg
+        return msg
+
+    async def _tx(self, coro) -> Optional[str]:
+        """Await a signer call returning (tx, resp, err); None on success,
+        else the error text."""
+        try:
+            _tx, resp, err = await coro
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            if getattr(e, "status", None) == 429 or "(429)" in str(e):
+                msg = "RATE_LIMITED: " + msg
+            return msg
+        return self._tx_error(resp, err)
+
+    async def place_post_only(self, *, coi: int, is_buy: bool, qty: float,
+                              px: float) -> Optional[str]:
+        """Resting post-only limit order (never takes liquidity; the exchange
+        cancels it if it would cross). Fills arrive on the account stream."""
+        from lighter import SignerClient
+        return await self._tx(self.signer.create_order(
+            market_index=self.market_id,
+            client_order_index=coi,
+            base_amount=int(round(qty * 10 ** self.size_decimals)),
+            price=int(round(px * 10 ** self.price_decimals)),
+            is_ask=not is_buy,
+            order_type=SignerClient.ORDER_TYPE_LIMIT,
+            time_in_force=SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
+            reduce_only=False,
+            trigger_price=0,
+            order_expiry=SignerClient.DEFAULT_28_DAY_ORDER_EXPIRY,
+        ))
+
+    async def modify_resting(self, *, coi: int, qty: float,
+                             px: float) -> Optional[str]:
+        return await self._tx(self.signer.modify_order(
+            market_index=self.market_id,
+            order_index=coi,
+            base_amount=int(round(qty * 10 ** self.size_decimals)),
+            price=int(round(px * 10 ** self.price_decimals)),
+            trigger_price=0,
+        ))
+
+    async def cancel_resting(self, coi: int) -> Optional[str]:
+        return await self._tx(self.signer.cancel_order(
+            market_index=self.market_id, order_index=coi))
+
+    async def cancel_all_resting(self) -> Optional[str]:
+        """Immediately cancel every resting order in this market (falls back
+        to all markets on SDK versions without a market filter)."""
+        from lighter import SignerClient
+        kwargs = {"time_in_force": SignerClient.CANCEL_ALL_TIF_IMMEDIATE,
+                  "timestamp_ms": 0}
+        try:
+            params = inspect.signature(self.signer.cancel_all_orders).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "cancel_all_market_index" in params:
+            kwargs["cancel_all_market_index"] = self.market_id
+        else:
+            log.warning("[%s] SDK has no per-market cancel-all — cancelling "
+                        "resting orders in ALL markets", self.name)
+        return await self._tx(self.signer.cancel_all_orders(**kwargs))
+
+    async def schedule_cancel_all(self, at_ms: int) -> Optional[str]:
+        """Exchange-side dead man's switch: every resting order of the account
+        (all markets) is cancelled at at_ms unless this is called again."""
+        from lighter import SignerClient
+        return await self._tx(self.signer.cancel_all_orders(
+            time_in_force=SignerClient.CANCEL_ALL_TIF_SCHEDULED,
+            timestamp_ms=int(at_ms)))
+
+    def next_coi(self) -> int:
+        return self._next_coi()
 
     # -------------------------------------------------------------- accounts
 

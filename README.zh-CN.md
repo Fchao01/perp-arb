@@ -278,6 +278,34 @@ python3 tools/maker_shadow.py collect --symbol SNDK --config sndk.yaml --half-sp
 python3 tools/maker_shadow.py report --dir logs/sndk
 ```
 
+## 挂单模式（实盘，`--mode maker`）
+
+在 RH 上用 post-only 限价单双边挂单，成交后立即在 LIGHTER 吃单对冲，持有的是
+两边的价差仓位而不是单边方向。挂单价格 = LIGHTER 中间价 ×（1 + 溢价中枢）±
+`half_spread_bps`，中枢是 RH/LIGHTER 中间价溢价的 EMA（与 `maker_shadow.py`
+模拟的方式一致）。参数在 `config.yaml` 的 `maker:` 段，见 config.example.yaml。
+
+```bash
+python3 main.py --mode maker --symbol SNDK --primary light-rh --hedge lighter --config sndk.yaml --no-dashboard
+```
+
+**行情剧烈时的保护**：以下任一情况都会立刻撤掉 RH 上的双边挂单并暂停报价——
+LIGHTER 中间价短时间（`move_window_sec`）或较长时间（`long_move_window_sec`）
+内波动过大、RH 中间价短时间波动过大、LIGHTER 价差过宽、溢价偏离中枢过多、
+一分钟内成交笔数过多、设定的禁止报价时段（`blackout_windows`，按美东时间、自动
+处理夏令时，建议避开美股开盘和收盘）、行情断线或交易所不可用、对冲未完成。
+本次运行按市值亏损超过 `max_loss_usd` 后永久停止报价。
+
+**安全措施**：启动和退出（Ctrl+C）时撤掉该市场的所有挂单，退出时再把剩余净仓位
+对冲平；`dead_man_sec` 开启交易所端定时撤单，机器人崩溃或断网后挂单会被交易所
+自动撤掉（注意它会撤掉 RH 账户**所有市场**的挂单）。每笔成交和对冲写入
+`logs/{symbol}/maker_fills.csv`，含相对中枢的扣费后收益。
+
+**前提**：需要撤单 0 延迟、操作上限高的 RH 账户等级——普通账户参数下的模拟每
+1 美元成交额亏约 3bps。`max_actions_per_min` 要低于账户等级上限。同一账户、同一
+市场不要同时运行吃单模式的机器人。先用最小的 `quote_usd` 和 `max_position_usd`
+测试。
+
 ## 执行机制
 
 - 两条腿**同时发出吃单**：Lighter 用带均价保护的市价单，在鉴权 websocket
@@ -311,6 +339,7 @@ entropy_arb/feeds.py     官方 HL ws + zkLighter ws 行情
 entropy_arb/venue_hl.py  Hyperliquid dex 适配器（Entropy、tradexyz）
 entropy_arb/venue_lighter.py  zkLighter 适配器（主网、Robinhood 链）
 entropy_arb/engine.py    双交易所策略主循环
+entropy_arb/maker.py     挂单模式（RH 挂单 + LIGHTER 对冲 + 行情剧烈保护）
 entropy_arb/dashboard.py Rich 终端仪表盘
 entropy_arb/recorder.py  分钟级盘口数据采集
 tools/analyze.py         minutes.csv -> 阈值建议

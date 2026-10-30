@@ -313,6 +313,41 @@ python3 tools/maker_shadow.py collect --symbol SNDK --config sndk.yaml --half-sp
 python3 tools/maker_shadow.py report --dir logs/sndk
 ```
 
+## Maker mode (live, `--mode maker`)
+
+Post-only quotes on both sides of RH, each fill hedged at once with a taker
+order on LIGHTER, so the bot holds the basis rather than the outright. Quotes
+sit at LIGHTER mid × (1 + premium center) ± `half_spread_bps`, the center
+being an EMA of the RH/LIGHTER mid premium (as simulated by
+`maker_shadow.py`). Parameters live in the `maker:` section of config.yaml
+(see config.example.yaml).
+
+```bash
+python3 main.py --mode maker --symbol SNDK --primary light-rh --hedge lighter --config sndk.yaml --no-dashboard
+```
+
+**Volatility guard**: both quotes are cancelled and quoting pauses when the
+LIGHTER mid moves too far within `move_window_sec` or `long_move_window_sec`,
+the RH mid moves too far within `move_window_sec`, the LIGHTER spread is too
+wide, the premium is too far from the center, there are too many fills in a
+minute, a blackout window is active (`blackout_windows`, US/Eastern by
+default, DST-aware — keep the US open and close out), a feed or venue is
+down, or a hedge did not complete. A session mark-to-market loss beyond
+`max_loss_usd` stops quoting for good.
+
+**Safety**: every resting order in the market is cancelled on start and on
+shutdown (Ctrl+C), and the remaining net is hedged on shutdown.
+`dead_man_sec` keeps an exchange-side scheduled cancel-all armed, so quotes do
+not outlive a crashed or disconnected bot (it cancels resting orders in *all*
+markets of the RH account). Every fill and its hedge go to
+`logs/{symbol}/maker_fills.csv` with the edge against the center after fees.
+
+**Requirements**: an RH tier with 0 ms cancels and a high action limit — with
+standard-tier latencies the shadow simulation lost ~3 bps of volume. Keep
+`max_actions_per_min` below your tier's limit. Do not run the taker bot on the
+same accounts and market. Start with the smallest `quote_usd` and
+`max_position_usd`.
+
 ## How execution works
 
 - Both legs are **taker** orders sent concurrently: Lighter market orders
@@ -351,6 +386,7 @@ entropy_arb/feeds.py     official HL ws + zkLighter ws book feeds
 entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
 entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
 entropy_arb/engine.py    the two-venue strategy loop
+entropy_arb/maker.py     maker mode (RH quotes, LIGHTER hedge, volatility guard)
 entropy_arb/dashboard.py Rich terminal dashboard
 entropy_arb/recorder.py  1-minute orderbook bars
 tools/analyze.py         minutes.csv -> suggested thresholds

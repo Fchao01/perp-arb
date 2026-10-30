@@ -113,6 +113,54 @@ execution:
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
   http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
 
+# ===================== MAKER MODE / 挂单模式 ===============================
+# Only used with  python3 main.py --mode maker ...  (the default taker mode
+# ignores this section). Post-only quotes on the primary (RH) around
+#     hedge_mid * (1 + center)  ±  half_spread_bps
+# where center is an EMA of the RH/LIGHTER mid premium; every fill is hedged
+# at once with a taker order on the hedge venue (LIGHTER).
+# 仅在 --mode maker 时使用。以 LIGHTER 中间价加溢价中枢为基准，在 RH 双边挂
+# post-only 单；每次成交立即在 LIGHTER 吃单对冲。
+#
+# Needs fast cancels: an RH account tier with 0 ms cancel latency and a high
+# order-action limit (the shadow simulation lost ~3 bps/volume with 300 ms
+# cancels and ~40 actions/min). Set max_actions_per_min below your tier's
+# limit. Do not run another bot on the same accounts and market.
+# 需要撤单 0 延迟、操作上限高的 RH 账户等级（普通账户模拟结果亏约 3bps）。
+# max_actions_per_min 要低于账户等级的上限。同一账户同一市场不要再跑别的机器人。
+maker:
+  half_spread_bps: 3.0        # quote distance from ref, each side / 每边挂单距离
+  quote_usd: 50               # size of each quote / 每笔挂单金额
+  max_position_usd: 200       # stop quoting the side that adds beyond this / 单边仓位上限
+  requote_bps: 1.0            # modify a quote once its target moved this much / 改单阈值
+  max_actions_per_min: 600    # place + modify + cancel budget on RH / 每分钟操作上限
+  center_window_sec: 900      # premium-center EMA time constant / 中枢时间常数
+  center_warmup_sec: 300      # history before quoting (seeded from minutes.csv)
+  maker_fee_bps: 0.0          # your real RH maker fee, for the edge accounting / 实际挂单费率
+
+  # --- volatility guard: any trigger cancels both quotes for pause_sec
+  # --- 行情剧烈时的保护：任一条件触发即撤掉双边挂单并暂停 pause_sec 秒
+  move_window_sec: 10
+  max_move_bps: 10            # LIGHTER mid moved more than this in move_window_sec
+  long_move_window_sec: 120
+  max_long_move_bps: 30       # ... or more than this in long_move_window_sec
+  max_primary_move_bps: 15    # RH mid moved more than this in move_window_sec
+  max_hedge_spread_bps: 5     # LIGHTER spread wider than this (no pause, just off)
+  max_basis_dev_bps: 15       # premium this far from the center
+  max_fills_per_min: 10       # one-way flow: more fills than this in 60 s
+  pause_sec: 60
+  # Weekday windows with no quoting, in blackout_tz (DST-aware). For US stock
+  # perps keep the open and the close (and earnings) out:
+  # 工作日禁止报价时段（按 blackout_tz，自动处理夏令时）。美股永续建议避开开盘和收盘：
+  blackout_windows: []        # e.g. ["09:25-09:45", "15:55-16:45"]
+  blackout_tz: America/New_York
+
+  max_loss_usd: 5             # session mark-to-market loss that stops quoting for good / 止损
+  dead_man_sec: 60            # exchange-side cancel-all if the bot stops refreshing (0 = off)
+                              # note: it cancels resting orders in ALL markets of the RH account
+                              # 交易所定时撤单：机器人停止刷新后自动撤掉 RH 账户所有市场的挂单
+  fills_csv: logs/{symbol}/maker_fills.csv
+
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and
 # writes one CSV row per minute. This is the input for tools/analyze.py.

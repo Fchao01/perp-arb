@@ -104,6 +104,38 @@ class VenueConf:
 
 
 @dataclass
+class MakerConf:
+    """Maker mode: post-only quotes on the primary (RH), hedged on the hedge
+    venue. See the `maker:` section of config.example.yaml."""
+    half_spread_bps: float = 3.0
+    quote_usd: float = 50.0
+    max_position_usd: float = 200.0
+    requote_bps: float = 1.0
+    max_actions_per_min: int = 600
+    center_window_sec: float = 900.0
+    center_warmup_sec: float = 300.0
+    maker_fee_bps: float = 0.0
+    # volatility guard: any trigger pulls both quotes for pause_sec
+    move_window_sec: float = 10.0
+    max_move_bps: float = 10.0
+    long_move_window_sec: float = 120.0
+    max_long_move_bps: float = 30.0
+    max_primary_move_bps: float = 15.0
+    max_hedge_spread_bps: float = 5.0
+    max_basis_dev_bps: float = 15.0
+    max_fills_per_min: int = 10
+    pause_sec: float = 60.0
+    # blackout windows "HH:MM-HH:MM" in blackout_tz (weekdays only)
+    blackout_windows: tuple = ()
+    blackout_tz: str = "America/New_York"
+    # session stop: stop quoting for good once mark-to-market loss exceeds
+    max_loss_usd: float = 5.0
+    # exchange-side dead man's switch (scheduled cancel-all); 0 = off
+    dead_man_sec: float = 60.0
+    fills_csv: str = "logs/{symbol}/maker_fills.csv"
+
+
+@dataclass
 class TelegramConf:
     bot_token: Optional[str] = field(default=None, repr=False)
     chat_id: Optional[str] = None
@@ -164,6 +196,7 @@ class Config:
     midline_auto: bool = False
     midline_window_min: float = 60.0
     midline_warmup_min: float = 10.0
+    maker: MakerConf = field(default_factory=MakerConf)
 
     @property
     def creds_complete(self) -> bool:
@@ -233,6 +266,30 @@ _SCHEMA: Dict[str, Any] = {
         "enabled": bool,
         "csv": str,
     },
+    "maker": {
+        "half_spread_bps": float,
+        "quote_usd": float,
+        "max_position_usd": float,
+        "requote_bps": float,
+        "max_actions_per_min": int,
+        "center_window_sec": float,
+        "center_warmup_sec": float,
+        "maker_fee_bps": float,
+        "move_window_sec": float,
+        "max_move_bps": float,
+        "long_move_window_sec": float,
+        "max_long_move_bps": float,
+        "max_primary_move_bps": float,
+        "max_hedge_spread_bps": float,
+        "max_basis_dev_bps": float,
+        "max_fills_per_min": int,
+        "pause_sec": float,
+        "blackout_windows": "list[str]",
+        "blackout_tz": str,
+        "max_loss_usd": float,
+        "dead_man_sec": float,
+        "fills_csv": str,
+    },
     "logging": {
         "level": str,
         "status_interval_sec": float,
@@ -271,11 +328,65 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
         elif want is str:
             if not isinstance(val, str):
                 raise ConfigError(f"'{here}' must be a string, got {val!r}")
+        elif want == "list[str]":
+            if not (isinstance(val, list)
+                    and all(isinstance(x, str) for x in val)):
+                raise ConfigError(f"'{here}' must be a list of strings, "
+                                  f"got {val!r}")
         elif want == "float|auto":
             if not (val == "auto" or (isinstance(val, (int, float))
                                       and not isinstance(val, bool))):
                 raise ConfigError(f"'{here}' must be a number or auto, "
                                   f"got {val!r} / 必须是数字或 auto")
+
+
+def parse_window(text: str):
+    """'HH:MM-HH:MM' -> (start_min, end_min); end < start wraps midnight."""
+    try:
+        a, b = text.split("-")
+        out = []
+        for part in (a, b):
+            h, m = part.strip().split(":")
+            h, m = int(h), int(m)
+            if not (0 <= h < 24 and 0 <= m < 60):
+                raise ValueError
+            out.append(h * 60 + m)
+    except ValueError:
+        raise ConfigError(f"maker.blackout_windows entry {text!r} must look "
+                          f"like '15:55-16:45' / 格式应为 '15:55-16:45'")
+    if out[0] == out[1]:
+        raise ConfigError(f"maker.blackout_windows entry {text!r} is empty")
+    return out[0], out[1]
+
+
+def _load_maker(raw: dict, symbol: str) -> MakerConf:
+    m = raw.get("maker") or {}
+    d = MakerConf()
+    conf = MakerConf(**{
+        k: (tuple(m[k]) if k == "blackout_windows" else type(getattr(d, k))(m[k]))
+        for k in m})
+    for k in ("half_spread_bps", "quote_usd", "max_position_usd",
+              "center_window_sec", "move_window_sec", "long_move_window_sec",
+              "max_move_bps", "max_long_move_bps", "max_primary_move_bps",
+              "max_hedge_spread_bps", "max_basis_dev_bps", "max_loss_usd"):
+        if getattr(conf, k) <= 0:
+            raise ConfigError(f"maker.{k} must be > 0 / 必须大于 0")
+    for k in ("requote_bps", "center_warmup_sec", "maker_fee_bps",
+              "pause_sec", "dead_man_sec"):
+        if getattr(conf, k) < 0:
+            raise ConfigError(f"maker.{k} must be >= 0 / 不能为负数")
+    if conf.max_actions_per_min < 1 or conf.max_fills_per_min < 1:
+        raise ConfigError("maker.max_actions_per_min and max_fills_per_min "
+                          "must be >= 1")
+    if conf.max_position_usd < conf.quote_usd:
+        raise ConfigError("maker.max_position_usd must be >= quote_usd / "
+                          "仓位上限不能小于单笔报价金额")
+    if 0 < conf.dead_man_sec < 15:
+        raise ConfigError("maker.dead_man_sec must be 0 (off) or >= 15")
+    for w in conf.blackout_windows:
+        parse_window(w)
+    conf.fills_csv = _symbol_path(conf.fills_csv, symbol)
+    return conf
 
 
 def _get(d: dict, section: str, key: str, default):
@@ -463,4 +574,5 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         dashboard=bool(_get(raw, "logging", "dashboard", True)),
         log_file=_symbol_path(
             _get(raw, "logging", "file", "logs/{symbol}/engine.log"), symbol),
+        maker=_load_maker(raw, symbol),
     )

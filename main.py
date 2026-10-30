@@ -71,12 +71,17 @@ def run_event_loop(coro, use_uvloop: bool = True):
 
 
 async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
-                log_buffer, lang: str) -> None:
+                log_buffer, lang: str, mode: str = "taker") -> None:
     loop = asyncio.get_running_loop()
     logging.getLogger("main").info(
-        "event loop: %s",
-        "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio")
-    eng = Engine(cfg, record_only=record_only)
+        "event loop: %s | mode: %s",
+        "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio",
+        mode)
+    if mode == "maker":
+        from entropy_arb.maker import MakerEngine
+        eng = MakerEngine(cfg, record_only=record_only)
+    else:
+        eng = Engine(cfg, record_only=record_only)
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, eng.request_stop)
     if not use_dashboard:
@@ -124,6 +129,11 @@ def main() -> None:
                       help="force the Rich dashboard even without a tty")
     disp.add_argument("--no-dashboard", action="store_true",
                       help="plain console logs instead of the dashboard")
+    p.add_argument("--mode", choices=("taker", "maker"), default="taker",
+                   help="taker: cross both books on a premium signal "
+                        "(default); maker: post-only quotes on the primary, "
+                        "hedged on the hedge venue / maker: 在主腿挂单，"
+                        "成交后在对冲腿吃单对冲")
     p.add_argument("--no-uvloop", action="store_true",
                    help="use the standard asyncio event loop even when "
                         "uvloop is installed / 不使用 uvloop")
@@ -138,6 +148,11 @@ def main() -> None:
         sys.exit(2)
 
     use_dashboard = (cfg.dashboard or args.dashboard) and not args.no_dashboard
+    if args.mode == "maker" and use_dashboard:
+        # the dashboard renders the taker strategy's state
+        print("maker mode: dashboard off, plain logs / 挂单模式不显示仪表盘",
+              file=sys.stderr)
+        use_dashboard = False
     force_tty = args.dashboard
     if use_dashboard and not (sys.stdout.isatty() or force_tty):
         use_dashboard = False
@@ -163,7 +178,8 @@ def main() -> None:
         run_event_loop(amain(cfg, record_only=args.record_only,
                              use_dashboard=use_dashboard, force_tty=force_tty,
                              log_buffer=log_buffer,
-                             lang="zh" if args.cn else "en"),
+                             lang="zh" if args.cn else "en",
+                             mode=args.mode),
                        use_uvloop=not args.no_uvloop)
     except RuntimeError as e:
         # startup failures (missing credentials, market not found, venue
