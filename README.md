@@ -263,6 +263,25 @@ by day:
 python3 tools/leg_report.py --csv logs/sndk/trades.csv --hedges logs/sndk/hedges.csv
 ```
 
+## Compare with a reference account (read-only)
+
+`tools/compare_account.py` pulls the public trade history of a reference
+account (default: RH 6223 and its mainnet twin 397711) and of your own
+accounts, joins it with your `trades.csv`, and on signals both traded reports
+how much later you decided than the reference sent, whose RH order matched
+first, each side's send-to-match latency, RH fill versus your planned price,
+and the premium each captured. No keys, no orders.
+
+```bash
+python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv --env-file 18.env --hours 6
+```
+
+`feed lag` in the status line is receive time minus the exchange timestamp of
+book frames (n/a when frames carry none); `buy_feed_lag_ms` /
+`sell_feed_lag_ms` at the end of `trades.csv` are the same for the books a
+decision used. The new columns rotate an existing `trades.csv` to
+`trades.csv.old` once.
+
 ## Read-only all-market screener and dashboard
 
 `tools/market_screener.py` independently observes common active RH/Lighter

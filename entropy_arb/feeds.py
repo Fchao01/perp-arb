@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from typing import Callable, Optional
 
 try:
@@ -40,6 +42,48 @@ def _chan_id(channel: str) -> Optional[int]:
     return None
 
 
+def _to_sec(v: float) -> float:
+    """Epoch timestamp in s / ms / us / ns -> seconds."""
+    if v > 1e17:
+        return v / 1e9
+    if v > 1e14:
+        return v / 1e6
+    if v > 1e11:
+        return v / 1e3
+    return float(v)
+
+
+def exchange_ts(msg: dict, ob: Optional[dict] = None) -> Optional[float]:
+    """Exchange timestamp of a book frame in epoch seconds, if it has one."""
+    for src in (msg, ob):
+        if not isinstance(src, dict):
+            continue
+        for key in ("timestamp", "ts", "time"):
+            v = src.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                return _to_sec(float(v))
+    return None
+
+
+class FeedLag:
+    """Recent (local receive - exchange timestamp) samples, in ms."""
+
+    def __init__(self, maxlen: int = 5000) -> None:
+        self.samples: deque = deque(maxlen=maxlen)
+
+    def add(self, recv_ts: float, exch_ts: Optional[float]) -> None:
+        if exch_ts is not None:
+            self.samples.append((recv_ts - exch_ts) * 1000.0)
+
+    def stats(self):
+        """(n, p50, p90) over the retained samples, or None."""
+        if not self.samples:
+            return None
+        xs = sorted(self.samples)
+        n = len(xs)
+        return n, xs[n // 2], xs[min(n - 1, int(n * 0.9))]
+
+
 class LighterBookFeed:
     """zkLighter order book for one market over one connection."""
 
@@ -52,6 +96,8 @@ class LighterBookFeed:
         self.notify = notify
         self._nonce: Optional[int] = None
         self._synced = False
+        self.lag = FeedLag()
+        self._recv_ts = 0.0
 
     async def _subscribe(self, ws) -> None:
         await ws.send(json.dumps({"type": "subscribe",
@@ -88,6 +134,10 @@ class LighterBookFeed:
         if end is not None:
             self._nonce = end
         self.book.apply_lighter(ob, snapshot=False)
+        ts = exchange_ts(msg, ob)
+        if ts is not None:
+            self.book.exch_ts = ts
+            self.lag.add(self._recv_ts or time.time(), ts)
         self.notify()
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -101,6 +151,7 @@ class LighterBookFeed:
                     self._nonce = None
                     self._synced = False
                     async for raw in ws:
+                        self._recv_ts = time.time()
                         backoff = 1.0
                         msg = json.loads(raw)
                         t = msg.get("type")

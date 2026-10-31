@@ -236,6 +236,21 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 python3 tools/leg_report.py --csv logs/sndk/trades.csv --hedges logs/sndk/hedges.csv
 ```
 
+## 与参考账户对比（只读）
+
+`tools/compare_account.py` 从公开成交记录拉取参考账户（默认 RH 6223 和它在主网的
+397711）和你自己账户的成交，结合你的 `trades.csv`，在双方都交易过的信号上比较：
+你做出决定比参考账户发单晚多少毫秒、谁的 RH 订单先撮合、各自从发单到交易所成交
+的延迟、RH 成交价相对你计划价的偏差，以及双方实际拿到的溢价。不需要密钥，也不下单。
+
+```bash
+python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv --env-file 18.env --hours 6
+```
+
+状态日志里的 `feed lag` 是盘口推送里交易所时间戳与本机收到时间之差（推送不带时间戳时
+显示 n/a）；`trades.csv` 末尾的 `buy_feed_lag_ms` / `sell_feed_lag_ms` 是做决定时所用
+盘口相对交易所时间的延迟。新增列后，旧的 `trades.csv` 会自动改名为 `trades.csv.old`。
+
 ## 全市场只读筛选与网页
 
 独立脚本扫描 RH 与 LIGHTER 共同活跃永续市场，不需要 `.env` 或私钥，不会下单。

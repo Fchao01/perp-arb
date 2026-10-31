@@ -237,10 +237,10 @@ class LighterVenue:
         log.info("[%s] signer ready (account %d)", self.name, c.account_index)
 
     def start_tasks(self, stop: asyncio.Event, notify, live: bool) -> list:
-        tasks = [asyncio.create_task(
-            LighterBookFeed(self.name, self.profile.ws_url, self.market_id,
-                            self.book, notify).run(stop),
-            name=f"book-{self.key}")]
+        self.book_feed = LighterBookFeed(self.name, self.profile.ws_url,
+                                         self.market_id, self.book, notify)
+        tasks = [asyncio.create_task(self.book_feed.run(stop),
+                                     name=f"book-{self.key}")]
         if live:
             self.orders_feed = AccountOrdersFeed(
                 self.name, self.profile.ws_url, self.market_id,

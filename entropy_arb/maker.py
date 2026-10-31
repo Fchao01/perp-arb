@@ -915,7 +915,7 @@ class MakerEngine(Engine):
             pnl = self.session_pnl()
             log.info("[maker] quotes %s bid %s / ask %s | %s mid %s | prem %s "
                      "center %s | pos %s %+.6g %s %+.6g net %+.6g | fills %d "
-                     "vol $%.0f edge $%.4f | MTM %s | %s",
+                     "vol $%.0f edge $%.4f | MTM %s | %s | %s",
                      p.name, quotes[0], quotes[1], h.name,
                      f"{h.book.mid():.6g}" if h.book.mid() else "—",
                      f"{prem:+.2f}" if prem is not None else "—",
@@ -924,4 +924,4 @@ class MakerEngine(Engine):
                      p.position + h.position, self.maker_fills,
                      self.maker_volume, self.maker_edge_usd,
                      f"${pnl:+.4f}" if pnl is not None else "—",
-                     self._block_reason or "quoting")
+                     self.feed_lag_text(), self._block_reason or "quoting")

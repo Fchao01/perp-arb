@@ -56,7 +56,8 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "sell_book_age_ms", "buy_submit_latency_ms",
               "sell_submit_latency_ms", "buy_confirm_latency_ms",
               "sell_confirm_latency_ms", "buy_total_latency_ms",
-              "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty"]
+              "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty",
+              "buy_feed_lag_ms", "sell_feed_lag_ms"]
 HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
                 "filled_qty", "status", "limit_px", "avg_px", "fee_bps",
                 "fee_usd", "client_order_id", "exchange_order_id",
@@ -523,6 +524,13 @@ class Engine:
                                  if buy_book and buy_book.last_update_ts else None),
             "sell_book_age_ms": ((decision_ts - sell_book.last_update_ts) * 1000.0
                                   if sell_book and sell_book.last_update_ts else None),
+            # decision time minus the exchange timestamp of the book it used
+            "buy_feed_lag_ms": ((decision_ts - buy_book.exch_ts) * 1000.0
+                                if buy_book and getattr(buy_book, "exch_ts", None)
+                                else None),
+            "sell_feed_lag_ms": ((decision_ts - sell_book.exch_ts) * 1000.0
+                                 if sell_book and getattr(sell_book, "exch_ts", None)
+                                 else None),
         }
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
@@ -1053,12 +1061,26 @@ class Engine:
                 band_s += f", auto midline {midline:+.2f}"
             log.info("[status] %s | prem %s bps (band %s) | pos %s "
                      "net %+.6g | trades %d hedges %d | MTM %s expEdge $%.4f "
-                     "fillEdge $%.4f%s%s",
+                     "fillEdge $%.4f%s | %s%s",
                      books, prem_s, band_s, pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge, rec,
+                     self.feed_lag_text(),
                      " *** HALTED ***" if self.halted else "")
+
+    def feed_lag_text(self) -> str:
+        """'feed lag RH p50 12ms p90 30ms | LIGHTER ...' from the book feeds'
+        exchange timestamps (receive time minus exchange time)."""
+        parts = []
+        for v in self.venues.values():
+            feed = getattr(v, "book_feed", None)
+            st = feed.lag.stats() if feed is not None and hasattr(feed, "lag") else None
+            if st:
+                parts.append(f"{v.name} p50 {st[1]:.0f}ms p90 {st[2]:.0f}ms")
+            else:
+                parts.append(f"{v.name} n/a")
+        return "feed lag " + " ".join(parts)
 
     @staticmethod
     def _csv_value(value, digits: int = 6):
@@ -1139,7 +1161,9 @@ class Engine:
                             self._csv_value(buy_total, 3),
                             self._csv_value(sell_total, 3),
                             self._csv_value(pair_total, 3),
-                            self._csv_value(abs(bfill - sfill))])
+                            self._csv_value(abs(bfill - sfill)),
+                            self._csv_value(book_snapshot.get("buy_feed_lag_ms"), 3),
+                            self._csv_value(book_snapshot.get("sell_feed_lag_ms"), 3)])
         except Exception:
             log.exception("csv write failed")
 

@@ -34,6 +34,9 @@ class OrderBook:
         self.ready = False
         self.last_update_ts = 0.0
         self.alive_ts = 0.0
+        # exchange timestamp (epoch s) of the last applied update, when the
+        # feed carries one; used only for latency telemetry
+        self.exch_ts: Optional[float] = None
         self._best_bid = _STALE
         self._best_ask = _STALE
 
