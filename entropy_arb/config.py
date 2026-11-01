@@ -197,6 +197,9 @@ class Config:
     midline_window_min: float = 60.0
     midline_warmup_min: float = 10.0
     maker: MakerConf = field(default_factory=MakerConf)
+    # size by signal age: ((min_age_sec, max_notional_usd), ...) ascending;
+    # empty = off (premium_persist_sec + max_order_notional apply)
+    persist_tiers: tuple = ()
 
     @property
     def creds_complete(self) -> bool:
@@ -241,6 +244,7 @@ _SCHEMA: Dict[str, Any] = {
         "take_fraction": float,
         "max_order_notional_usd": float,
         "min_order_notional_usd": float,
+        "persist_tiers": "pairs",
     },
     "inventory": {
         "scale_bps": float,
@@ -328,6 +332,14 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
         elif want is str:
             if not isinstance(val, str):
                 raise ConfigError(f"'{here}' must be a string, got {val!r}")
+        elif want == "pairs":
+            ok = isinstance(val, list) and all(
+                isinstance(x, list) and len(x) == 2 and all(
+                    isinstance(y, (int, float)) and not isinstance(y, bool)
+                    for y in x) for x in val)
+            if not ok:
+                raise ConfigError(f"'{here}' must be a list of [seconds, usd] "
+                                  f"pairs, got {val!r} / 格式应为 [[秒, 美元], ...]")
         elif want == "list[str]":
             if not (isinstance(val, list)
                     and all(isinstance(x, str) for x in val)):
@@ -387,6 +399,21 @@ def _load_maker(raw: dict, symbol: str) -> MakerConf:
         parse_window(w)
     conf.fills_csv = _symbol_path(conf.fills_csv, symbol)
     return conf
+
+
+def _load_tiers(raw: dict, min_notional: float) -> tuple:
+    tiers = tuple((float(a), float(b))
+                  for a, b in (_get(raw, "sizing", "persist_tiers", []) or []))
+    if not tiers:
+        return ()
+    ages = [a for a, _ in tiers]
+    if ages[0] < 0 or any(b <= a for a, b in zip(ages, ages[1:])):
+        raise ConfigError("sizing.persist_tiers ages must be >= 0 and strictly "
+                          "increasing / 秒数必须从小到大")
+    if any(usd < min_notional for _, usd in tiers):
+        raise ConfigError("sizing.persist_tiers amounts must be >= "
+                          "min_order_notional_usd / 金额不能低于最小下单额")
+    return tiers
 
 
 def _get(d: dict, section: str, key: str, default):
@@ -575,4 +602,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         log_file=_symbol_path(
             _get(raw, "logging", "file", "logs/{symbol}/engine.log"), symbol),
         maker=_load_maker(raw, symbol),
+        persist_tiers=_load_tiers(
+            raw, float(_get(raw, "sizing", "min_order_notional_usd", 10.0))),
     )

@@ -57,7 +57,7 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "sell_submit_latency_ms", "buy_confirm_latency_ms",
               "sell_confirm_latency_ms", "buy_total_latency_ms",
               "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty",
-              "buy_feed_lag_ms", "sell_feed_lag_ms"]
+              "buy_feed_lag_ms", "sell_feed_lag_ms", "signal_age_ms"]
 HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
                 "filled_qty", "status", "limit_px", "avg_px", "fee_bps",
                 "fee_usd", "client_order_id", "exchange_order_id",
@@ -66,6 +66,18 @@ HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
 BALANCE_POLL_SEC = 30.0
 # status of a follower leg that sequential mode deliberately did not send
 NOT_SENT = "not-sent"
+
+
+def tier_cap(tiers, age_sec: float) -> Optional[float]:
+    """Order notional cap for a signal that has persisted age_sec: the amount
+    of the highest tier whose age is reached, None below the first tier."""
+    cap = None
+    for min_age, usd in tiers:
+        if age_sec + 1e-9 >= min_age:
+            cap = usd
+        else:
+            break
+    return cap
 
 
 class Engine:
@@ -105,6 +117,8 @@ class Engine:
         # per-direction persistence arming: direction key -> first-seen ts
         self._armed: Dict[str, Optional[float]] = {"sell_entropy": None,
                                                    "buy_entropy": None}
+        # signal age (s) of the execution _scan last chose
+        self._fire_age: Optional[float] = None
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -475,28 +489,39 @@ class Engine:
             if not edge_present:
                 self._armed[dkey] = None
                 continue
+            tiers = cfg.persist_tiers
+            need = tiers[0][0] if tiers else cfg.premium_persist_sec
             armed = self._armed.get(dkey)
             if armed is None:
-                # premium persistence: only fire if the edge survives
-                # premium_persist_sec (filters one-tick phantoms)
+                # premium persistence: only fire if the edge survives the
+                # gate (filters one-tick phantoms); with persist_tiers the
+                # gate is the first tier's age
                 self._armed[dkey] = now
-                self._schedule_poke(cfg.premium_persist_sec)
+                self._schedule_poke(need)
                 continue
-            if now - armed < cfg.premium_persist_sec:
-                self._schedule_poke(cfg.premium_persist_sec - (now - armed))
+            age = now - armed
+            if age < need:
+                self._schedule_poke(need - age)
                 continue
+            cap = cfg.max_order_notional
+            if tiers:
+                cap = tier_cap(tiers, age)
+                if cap is None:
+                    continue
+                if abs(cap - cfg.max_order_notional) > 1e-9:
+                    plan, reason = self._plan(buy, sell, cap)
             if plan is None:
                 continue
             headroom = self._headroom(buy, sell, plan.buy_limit)
             if headroom < plan.buy_notional:
-                plan, _ = self._plan(buy, sell,
-                                     min(cfg.max_order_notional, headroom))
+                plan, _ = self._plan(buy, sell, min(cap, headroom))
                 if plan is None:
                     self._skiplog("%s blocked by position caps (headroom $%.0f)",
                                   dkey, max(headroom, 0.0))
                     continue
             if best is None or plan.exp_edge_usd > best[2].exp_edge_usd:
                 best = (buy, sell, plan)
+                self._fire_age = age
         return best
 
     # ------------------------------------------------------------- execution
@@ -535,11 +560,15 @@ class Engine:
         inv_bps = self._inv_add_bps(buy, sell)
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
+        signal_age = self._fire_age
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
-                 "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f",
+                 "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f | age %s",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
-                 plan.marginal_premium_bps, plan.exp_edge_usd)
+                 plan.marginal_premium_bps, plan.exp_edge_usd,
+                 f"{signal_age * 1000:.0f}ms" if signal_age is not None else "—")
+        book_snapshot["signal_age_ms"] = (signal_age * 1000.0
+                                          if signal_age is not None else None)
         slip = cfg.leg_slippage_bps / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
         sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
@@ -1163,7 +1192,8 @@ class Engine:
                             self._csv_value(pair_total, 3),
                             self._csv_value(abs(bfill - sfill)),
                             self._csv_value(book_snapshot.get("buy_feed_lag_ms"), 3),
-                            self._csv_value(book_snapshot.get("sell_feed_lag_ms"), 3)])
+                            self._csv_value(book_snapshot.get("sell_feed_lag_ms"), 3),
+                            self._csv_value(book_snapshot.get("signal_age_ms"), 1)])
         except Exception:
             log.exception("csv write failed")
 

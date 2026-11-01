@@ -68,5 +68,5 @@ def test_book_feed_records_lag_only_with_timestamps():
 
 def test_trades_csv_header_keeps_old_columns_first():
     # new columns are appended, so readers keyed by name keep working
-    assert CSV_HEADER[-2:] == ["buy_feed_lag_ms", "sell_feed_lag_ms"]
-    assert CSV_HEADER.index("residual_qty") == len(CSV_HEADER) - 3
+    i = CSV_HEADER.index("residual_qty")
+    assert CSV_HEADER[i + 1:i + 3] == ["buy_feed_lag_ms", "sell_feed_lag_ms"]

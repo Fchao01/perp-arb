@@ -79,6 +79,20 @@ sizing:
   take_fraction: 0.5           # fraction of crossable depth to take / 吃掉可套利深度的比例
   max_order_notional_usd: 500  # per-slice cap / 单笔名义上限
   min_order_notional_usd: 10   # skip dust / 低于此名义不下单
+  # Size by signal age: [seconds the edge has persisted, max $ per order].
+  # The edge's age counts from when it first crossed the threshold and
+  # restarts whenever it disappears; while it persists, each new execution
+  # uses the highest tier reached, so lasting dislocations get bigger orders
+  # than one-tick flickers. A first tier above 0 skips younger signals.
+  # When set, this replaces max_order_notional_usd and premium_persist_sec.
+  # 按信号持续时间分档决定单笔金额：[价差已持续的秒数, 单笔最多多少美元]。
+  # 持续时间从价差首次越过阈值开始算，中途消失则重新计时；持续期间每次下单
+  # 都用已达到的最高一档，持续越久单笔越大。第一档秒数大于 0 时，更年轻的信号
+  # 直接跳过。配置后取代 max_order_notional_usd 和 premium_persist_sec。
+  # persist_tiers:
+  #   - [0.0, 20]
+  #   - [0.3, 100]
+  #   - [1.0, 300]
 
 # ==================== INVENTORY LADDER / 库存阶梯 ==========================
 # Extra bps required once a venue's position passes floor_frac of its cap in

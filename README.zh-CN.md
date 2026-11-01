@@ -132,6 +132,10 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 可切换为纯日志输出（nohup/systemd 等非终端环境会自动退回纯日志），也可
 设置 `logging.dashboard: false`。
 
+**按信号持续时间分档下单**（`sizing.persist_tiers`）：价差刚出现时只下小单，持续得越久单笔越大，
+第一档秒数大于 0 时直接跳过更短的信号；配置后取代 `max_order_notional_usd` 和
+`premium_persist_sec`，不配置时行为不变。`trades.csv` 的 `signal_age_ms` 记录每次下单时信号已持续多久。
+
 ## 数据采集与分析
 
 采集器在所有模式下自动运行（`recorder.enabled: true`）：每秒采样一次两边

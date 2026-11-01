@@ -141,6 +141,11 @@ display the dashboard in Chinese. Use `--no-dashboard` for plain console
 logs (nohup/systemd — off-terminal runs fall back automatically), or set
 `logging.dashboard: false`.
 
+**Size by signal age** (`sizing.persist_tiers`): small orders on fresh edges, larger ones the
+longer the edge persists; a first tier above 0 s skips younger signals. When set it replaces
+`max_order_notional_usd` and `premium_persist_sec`; unset, behaviour is unchanged.
+`signal_age_ms` in `trades.csv` records each execution's signal age.
+
 ## Data collection & analysis
 
 The recorder runs automatically in every mode (`recorder.enabled: true`).
