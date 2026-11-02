@@ -251,6 +251,25 @@ python3 tools/leg_report.py --csv logs/sndk/trades.csv --hedges logs/sndk/hedges
 python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv --env-file 18.env --hours 6
 ```
 
+Lighter 的公开成交接口每个账户每个市场只返回最新 100 笔，所以单次运行只能看到活跃账户
+最近几分钟的成交。在机器人旁边常驻一个采集进程，之后从它的文件出报告；报告会显示双方
+成交数据实际覆盖了几个小时：
+
+```bash
+nohup python3 tools/compare_account.py --collect --symbol BTC --env-file 18.env \
+    --store logs/btc/ref_trades.jsonl > /dev/null 2>&1 &
+python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv \
+    --env-file 18.env --store logs/btc/ref_trades.jsonl --hours 24
+```
+
+## Websocket 下单通道
+
+`execution.order_transport: ws`（或命令行 `--order-transport ws`）会在本地签名 Lighter
+吃单，然后通过常连的 websocket 以 `jsonapi/sendtx` 发出，不再走 HTTPS 请求。websocket
+断开时订单自动走 HTTP；某个订单写入 websocket 失败时，同一笔已签名交易改走 HTTP 重发。
+回执显示被拒时该腿立即失败并重新获取 nonce；是否成交仍以账户推送为准。每个订单会记录
+`ws order coi …: sign Xms write Yms reply Zms`，前 5 条原始回执记为 `ws tx reply sample`。
+
 状态日志里的 `feed lag` 是盘口推送里交易所时间戳与本机收到时间之差（推送不带时间戳时
 显示 n/a）；`trades.csv` 末尾的 `buy_feed_lag_ms` / `sell_feed_lag_ms` 是做决定时所用
 盘口相对交易所时间的延迟。新增列后，旧的 `trades.csv` 会自动改名为 `trades.csv.old`。

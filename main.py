@@ -20,6 +20,7 @@ config.yaml, credentials in .env — see the README (English) /
 README.zh-CN.md (中文).
 """
 import argparse
+import dataclasses
 import asyncio
 import contextlib
 import logging
@@ -74,9 +75,9 @@ async def amain(cfg, record_only: bool, use_dashboard: bool, force_tty: bool,
                 log_buffer, lang: str, mode: str = "taker") -> None:
     loop = asyncio.get_running_loop()
     logging.getLogger("main").info(
-        "event loop: %s | mode: %s",
+        "event loop: %s | mode: %s | orders over %s",
         "uvloop" if type(loop).__module__.startswith("uvloop") else "asyncio",
-        mode)
+        mode, cfg.order_transport)
     if mode == "maker":
         from entropy_arb.maker import MakerEngine
         eng = MakerEngine(cfg, record_only=record_only)
@@ -134,6 +135,9 @@ def main() -> None:
                         "(default); maker: post-only quotes on the primary, "
                         "hedged on the hedge venue / maker: 在主腿挂单，"
                         "成交后在对冲腿吃单对冲")
+    p.add_argument("--order-transport", choices=("http", "ws"), default=None,
+                   help="how Lighter taker orders are sent (overrides "
+                        "execution.order_transport) / 下单通道")
     p.add_argument("--no-uvloop", action="store_true",
                    help="use the standard asyncio event loop even when "
                         "uvloop is installed / 不使用 uvloop")
@@ -146,6 +150,8 @@ def main() -> None:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         sys.exit(2)
+    if args.order_transport:
+        cfg = dataclasses.replace(cfg, order_transport=args.order_transport)
 
     use_dashboard = (cfg.dashboard or args.dashboard) and not args.no_dashboard
     if args.mode == "maker" and use_dashboard:

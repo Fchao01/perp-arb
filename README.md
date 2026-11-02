@@ -281,6 +281,29 @@ and the premium each captured. No keys, no orders.
 python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv --env-file 18.env --hours 6
 ```
 
+Lighter's public trades endpoint only returns the newest 100 fills per
+account and market, so a one-off run covers just the last few minutes of an
+active account. Keep a collector running beside the bot and report from its
+file; the report prints how many hours each side's fills actually cover:
+
+```bash
+nohup python3 tools/compare_account.py --collect --symbol BTC --env-file 18.env \
+    --store logs/btc/ref_trades.jsonl > /dev/null 2>&1 &
+python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv \
+    --env-file 18.env --store logs/btc/ref_trades.jsonl --hours 24
+```
+
+## Websocket order transport
+
+`execution.order_transport: ws` (or `--order-transport ws`) signs each Lighter
+taker order locally and sends it as a `jsonapi/sendtx` frame on a persistent
+websocket instead of an HTTPS POST. When that socket is down, orders go over
+HTTP; if a frame cannot be written, the same signed transaction is resent
+over HTTP. A rejection in the reply fails the leg at once and refetches the
+nonce; whether it filled still comes from the account stream. Each order logs
+`ws order coi …: sign Xms write Yms reply Zms`, and the first five raw replies
+are logged as `ws tx reply sample`.
+
 `feed lag` in the status line is receive time minus the exchange timestamp of
 book frames (n/a when frames carry none); `buy_feed_lag_ms` /
 `sell_feed_lag_ms` at the end of `trades.csv` are the same for the books a

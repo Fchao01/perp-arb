@@ -200,6 +200,9 @@ class Config:
     # size by signal age: ((min_age_sec, max_notional_usd), ...) ascending;
     # empty = off (premium_persist_sec + max_order_notional apply)
     persist_tiers: tuple = ()
+    # how Lighter taker orders are sent: "http" (SDK sendTx) or "ws"
+    order_transport: str = "http"
+    ws_reply_timeout_sec: float = 1.5
 
     @property
     def creds_complete(self) -> bool:
@@ -265,6 +268,8 @@ _SCHEMA: Dict[str, Any] = {
         "reconcile_sec": float,
         "venue_probe_sec": float,
         "http_keepalive_sec": float,
+        "order_transport": str,
+        "ws_reply_timeout_sec": float,
     },
     "recorder": {
         "enabled": bool,
@@ -557,6 +562,12 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         raise ConfigError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set together / "
                           "Telegram 的 token 和 chat_id 必须同时填写")
 
+    transport = str(_get(raw, "execution", "order_transport", "http")).lower()
+    if transport not in ("http", "ws"):
+        raise ConfigError("execution.order_transport must be 'http' or 'ws'")
+    ws_reply_timeout = float(_get(raw, "execution", "ws_reply_timeout_sec", 1.5))
+    if not ws_reply_timeout > 0:
+        raise ConfigError("execution.ws_reply_timeout_sec must be > 0")
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -604,4 +615,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         maker=_load_maker(raw, symbol),
         persist_tiers=_load_tiers(
             raw, float(_get(raw, "sizing", "min_order_notional_usd", 10.0))),
+        order_transport=transport,
+        ws_reply_timeout_sec=ws_reply_timeout,
     )

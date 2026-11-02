@@ -6,6 +6,20 @@ history plus your trades.csv; no keys are used.
     python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv \
         --env-file 18.env --hours 6
 
+Lighter's public trades endpoint only returns the newest page (100 fills
+per account and market; it ignores cursor), so a one-off run sees just the
+last few minutes of an active account. For a real comparison, keep a
+collector running next to the bot; it polls that page and appends every
+new fill to a file, deduplicated by trade id:
+
+    nohup python3 tools/compare_account.py --collect --symbol BTC \
+        --env-file 18.env --store logs/btc/ref_trades.jsonl > /dev/null 2>&1 &
+
+and later report from the file (add the same --store):
+
+    python3 tools/compare_account.py --symbol BTC --trades logs/btc/trades.csv \
+        --env-file 18.env --store logs/btc/ref_trades.jsonl --hours 24
+
 It reports, for both accounts:
   * send -> match: from the moment an order leaves the client to its first
     fill on the exchange (yours from trades.csv send times, the reference's
@@ -146,25 +160,97 @@ def market_id(api: str, symbol: str) -> int:
     raise RuntimeError(f"{symbol} not found on {api}")
 
 
-def fetch_trades(api: str, account: int, market: int, since_ms: int,
-                 max_pages: int = 300) -> List[dict]:
-    rows: List[dict] = []
-    cursor = None
-    for _ in range(max_pages):
-        params = {"sort_by": "timestamp", "sort_dir": "desc", "limit": 100,
-                  "account_index": account, "market_id": market}
-        if cursor:
-            params["cursor"] = cursor
-        data = _get(api + "/api/v1/trades", params)
-        page = data.get("trades") or []
-        rows += page
-        cursor = data.get("next_cursor")
-        if not page or not cursor:
-            break
-        if min(int(t.get("timestamp") or 0) for t in page) < since_ms:
-            break
-        time.sleep(0.2)
+def fetch_trades(api: str, account: int, market: int, since_ms: int = 0) -> List[dict]:
+    """The newest page of an account's fills on one market. The endpoint
+    ignores cursor/from, so this is all one request can return; use
+    --collect to accumulate history."""
+    params = {"sort_by": "timestamp", "sort_dir": "desc", "limit": 100,
+              "account_index": account, "market_id": market}
+    rows = _get(api + "/api/v1/trades", params).get("trades") or []
     return [t for t in rows if int(t.get("timestamp") or 0) >= since_ms]
+
+
+def trade_key(t: dict) -> tuple:
+    tid = t.get("trade_id")
+    if tid not in (None, ""):
+        return ("id", str(tid))
+    return ("k", t.get("timestamp"), t.get("ask_account_id"),
+            t.get("bid_account_id"), t.get("price"), t.get("size"))
+
+
+class TradeStore:
+    """Append-only JSON-lines file of public fills, one line per
+    (venue, account, trade), deduplicated across restarts."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.seen: set = set()
+        self.rows: List[dict] = []
+        if os.path.exists(path):
+            with open(path) as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                        k = (r["v"], int(r["a"]), trade_key(r["t"]))
+                    except (ValueError, KeyError, TypeError):
+                        continue  # a torn last line after a crash
+                    if k not in self.seen:
+                        self.seen.add(k)
+                        self.rows.append(r)
+
+    def add(self, venue: str, account: int, trades: Iterable[dict]) -> int:
+        new = []
+        for t in trades:
+            k = (venue, int(account), trade_key(t))
+            if k in self.seen:
+                continue
+            self.seen.add(k)
+            new.append({"v": venue, "a": int(account), "t": t})
+        if new:
+            d = os.path.dirname(self.path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(self.path, "a") as fh:
+                for r in new:
+                    fh.write(json.dumps(r, separators=(",", ":")) + "\n")
+            self.rows += new
+        return len(new)
+
+    def trades(self, venue: str, account: int, since_ms: int = 0) -> List[dict]:
+        return [r["t"] for r in self.rows
+                if r["v"] == venue and int(r["a"]) == int(account)
+                and int(r["t"].get("timestamp") or 0) >= since_ms]
+
+
+def collect(store: TradeStore, streams: List[tuple], interval: float,
+            fetch=fetch_trades, iterations: Optional[int] = None,
+            sleep=time.sleep, out=print) -> None:
+    """Poll the newest page of every (venue, api, account, market) stream
+    and keep the new fills. A poll whose whole page is new may have missed
+    fills in between (the account traded more than a page since the last
+    poll); that is reported so the interval can be shortened."""
+    n = 0
+    first = True
+    while iterations is None or n < iterations:
+        n += 1
+        parts = []
+        for venue, api, account, market in streams:
+            try:
+                page = fetch(api, account, market, 0)
+            except Exception as e:  # keep collecting through API hiccups
+                parts.append(f"{venue}/{account} error {e}")
+                continue
+            added = store.add(venue, account, page)
+            if added:
+                parts.append(f"{venue}/{account} +{added}")
+            if not first and page and added == len(page) and len(page) >= 100:
+                parts.append(f"{venue}/{account} page full of new fills: "
+                             f"may have missed some, lower --interval")
+        if parts:
+            out(time.strftime("%H:%M:%S ") + ", ".join(parts), flush=True)
+        first = False
+        if iterations is None or n < iterations:
+            sleep(interval)
 
 
 # ------------------------------------------------------------- analysis
@@ -281,6 +367,13 @@ def analyze(mine: List[MyTrade], my_rh: Dict[tuple, Order],
     return res
 
 
+def coverage_text(orders: Dict[tuple, Order], now_ms: int) -> str:
+    if not orders:
+        return "no fills"
+    first = min(o.first_ms for o in orders.values())
+    return f"fills cover the last {(now_ms - first) / 3.6e6:.1f} h"
+
+
 def report(res: dict, n_mine: int, n_ref_rh: int) -> None:
     lat = res["latency"]
     print(f"your filled executions in window: {n_mine} "
@@ -342,7 +435,7 @@ def write_csv(path: str, rows: List[dict]) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--symbol", required=True)
-    p.add_argument("--trades", required=True, help="your trades.csv")
+    p.add_argument("--trades", default=None, help="your trades.csv")
     p.add_argument("--hours", type=float, default=6.0)
     p.add_argument("--env-file", default=None,
                    help="read your account indices from this .env")
@@ -352,6 +445,12 @@ def main() -> None:
     p.add_argument("--ref-main", type=int, default=397711)
     p.add_argument("--window-ms", type=int, default=1000)
     p.add_argument("--out", default=None, help="write shared signals CSV")
+    p.add_argument("--store", default=None,
+                   help="JSON-lines file of collected public fills")
+    p.add_argument("--collect", action="store_true",
+                   help="keep polling public fills into --store (no report)")
+    p.add_argument("--interval", type=float, default=5.0,
+                   help="seconds between polls in --collect mode")
     a = p.parse_args()
 
     if a.env_file:
@@ -362,18 +461,45 @@ def main() -> None:
     if not (a.my_rh and a.my_main):
         p.error("give --my-rh and --my-main, or --env-file with "
                 "LIGHTER_RH_ACCOUNT_INDEX / LIGHTER_ACCOUNT_INDEX")
+    if a.collect and not a.store:
+        p.error("--collect needs --store")
+    if not a.collect and not a.trades:
+        p.error("--trades is required unless --collect")
+
+    rh_m, main_m = market_id(RH_API, a.symbol), market_id(MAIN_API, a.symbol)
+    streams = [("rh", RH_API, a.my_rh, rh_m), ("main", MAIN_API, a.my_main, main_m),
+               ("rh", RH_API, a.ref_rh, rh_m), ("main", MAIN_API, a.ref_main, main_m)]
+    store = TradeStore(a.store) if a.store else None
+    if a.collect:
+        print(f"collecting {a.symbol} fills of {a.my_rh}/{a.my_main} and "
+              f"{a.ref_rh}/{a.ref_main} every {a.interval:g}s into {a.store} "
+              f"({len(store.rows)} already stored)", flush=True)
+        collect(store, streams, a.interval)
+        return
 
     since_s = time.time() - a.hours * 3600
     since_ms = int(since_s * 1000)
+    now_ms = int(time.time() * 1000)
     mine = load_my_trades(a.trades, since_s)
-    rh_m, main_m = market_id(RH_API, a.symbol), market_id(MAIN_API, a.symbol)
     print(f"{a.symbol}: RH market {rh_m}, mainnet market {main_m} | you "
           f"{a.my_rh}/{a.my_main} vs reference {a.ref_rh}/{a.ref_main} | "
           f"last {a.hours:g} h\n")
-    my_rh = group_orders(normalize(fetch_trades(RH_API, a.my_rh, rh_m, since_ms), a.my_rh))
-    my_lt = group_orders(normalize(fetch_trades(MAIN_API, a.my_main, main_m, since_ms), a.my_main))
-    ref_rh = group_orders(normalize(fetch_trades(RH_API, a.ref_rh, rh_m, since_ms), a.ref_rh))
-    ref_lt = group_orders(normalize(fetch_trades(MAIN_API, a.ref_main, main_m, since_ms), a.ref_main))
+
+    def load(venue, api, account, market):
+        latest = fetch_trades(api, account, market, since_ms)
+        if store is None:
+            return latest
+        store.add(venue, account, latest)
+        return store.trades(venue, account, since_ms)
+
+    my_rh, my_lt, ref_rh, ref_lt = (
+        group_orders(normalize(load(*s_), s_[2])) for s_ in streams)
+    for name, orders in (("your RH", my_rh), ("reference RH", ref_rh)):
+        print(f"{name:<13} {coverage_text(orders, now_ms)}")
+    if store is None:
+        print("(no --store: only the newest public page per account; "
+              "run --collect for history)")
+    print()
     res = analyze(mine, my_rh, my_lt, ref_rh, ref_lt, a.window_ms)
     report(res, len(mine), len(ref_rh))
     if a.out:

@@ -95,19 +95,71 @@ def test_analyze_end_to_end():
     ca.report(res, len(mine), len(ref_rh))            # prints without error
 
 
-def test_fetch_trades_pages_until_window(monkeypatch):
-    pages = {None: {"trades": [{"timestamp": 300}, {"timestamp": 250}],
-                    "next_cursor": "c1"},
-             "c1": {"trades": [{"timestamp": 200}, {"timestamp": 90}],
-                    "next_cursor": "c2"},
-             "c2": {"trades": [{"timestamp": 50}], "next_cursor": None}}
-    seen = []
+def test_fetch_trades_is_one_request(monkeypatch):
+    # the endpoint ignores cursor and always returns the newest page
+    calls = []
 
     def fake_get(url, params, retries=3):
-        seen.append(params.get("cursor"))
-        return pages[params.get("cursor")]
+        calls.append(params)
+        return {"trades": [{"timestamp": 300}, {"timestamp": 90}],
+                "next_cursor": "c1"}
     monkeypatch.setattr(ca, "_get", fake_get)
-    monkeypatch.setattr(ca.time, "sleep", lambda s: None)
     rows = ca.fetch_trades("https://x", 1, 2, since_ms=100)
-    assert seen == [None, "c1"]                    # stopped once past window
-    assert [r["timestamp"] for r in rows] == [300, 250, 200]
+    assert len(calls) == 1 and "cursor" not in calls[0]
+    assert [r["timestamp"] for r in rows] == [300]
+
+
+def _t(tid, ts, ask=1, bid=2):
+    return {"trade_id": tid, "timestamp": ts, "ask_account_id": ask,
+            "bid_account_id": bid, "price": "100", "size": "1"}
+
+
+def test_store_dedups_and_survives_restart(tmp_path):
+    path = str(tmp_path / "sub" / "fills.jsonl")
+    st = ca.TradeStore(path)
+    assert st.add("rh", 6223, [_t(1, 100), _t(2, 200)]) == 2
+    assert st.add("rh", 6223, [_t(2, 200), _t(3, 300)]) == 1
+    # same trade seen from the other side's account is its own row
+    assert st.add("rh", 9, [_t(3, 300)]) == 1
+    with open(path, "a") as fh:
+        fh.write('{"v":"rh","a":6223,"t":{"trade')   # torn line from a crash
+    st2 = ca.TradeStore(path)
+    assert st2.add("rh", 6223, [_t(1, 100), _t(4, 400)]) == 1
+    assert [t["trade_id"] for t in st2.trades("rh", 6223, since_ms=150)] == [2, 3, 4]
+    assert st2.trades("main", 6223) == []
+
+
+def test_trade_key_without_id():
+    a = {"timestamp": 1, "ask_account_id": 1, "bid_account_id": 2,
+         "price": "1", "size": "2"}
+    assert ca.trade_key(a) == ca.trade_key(dict(a))
+    assert ca.trade_key(a) != ca.trade_key(dict(a, size="3"))
+
+
+def test_collect_accumulates_and_flags_gaps(tmp_path):
+    st = ca.TradeStore(str(tmp_path / "f.jsonl"))
+    polls = iter([
+        [_t(i, i) for i in range(100)],            # first poll: backlog, fine
+        [_t(i, i) for i in range(50, 150)],        # 50 new
+        [_t(i, i) for i in range(200, 300)],       # whole page new -> gap
+    ])
+    msgs = []
+
+    def fetch(api, account, market, since_ms):
+        if account == 6223:
+            return next(polls)
+        raise RuntimeError("boom")                 # other stream errors
+    ca.collect(st, [("rh", "x", 6223, 1), ("main", "y", 397711, 2)],
+               interval=5, fetch=fetch, iterations=3,
+               sleep=lambda s: None, out=lambda m, **k: msgs.append(m))
+    assert len(st.trades("rh", 6223)) == 250
+    assert "may have missed" not in msgs[0] and "may have missed" not in msgs[1]
+    assert "may have missed" in msgs[2]
+    assert all("397711 error" in m for m in msgs)
+
+
+def test_coverage_text():
+    o = ca.Order(cid=1, side="B", first_ms=0, last_ms=0)
+    assert ca.coverage_text({}, 0) == "no fills"
+    assert ca.coverage_text({(1, "B"): o}, 2 * 3_600_000) == \
+        "fills cover the last 2.0 h"

@@ -206,7 +206,9 @@ class Engine:
 
     def _make_venue(self, vc):
         if vc.kind == "lighter":
-            return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec)
+            return LighterVenue(vc, self.session, self.cfg.settle_timeout_sec,
+                                order_transport=self.cfg.order_transport,
+                                ws_reply_timeout_sec=self.cfg.ws_reply_timeout_sec)
         return HLVenue(vc, self.cfg.hl_api_url, self.cfg.hl_ws_url,
                        self.session, self.cfg.settle_timeout_sec)
 

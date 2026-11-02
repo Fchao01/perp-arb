@@ -126,6 +126,12 @@ execution:
   reconcile_sec: 15.0          # on-chain position sync cadence / 链上持仓核对周期
   venue_probe_sec: 30.0        # probe cadence for a down venue / 故障交易所探测周期
   http_keepalive_sec: 10.0     # keep order-path TLS warm; 0 = off / 订单链路保活
+  # Lighter taker orders: "http" (SDK sendTx, default) or "ws" (signed locally,
+  # sent on a persistent websocket; falls back to HTTP while it is down).
+  # Fills are still confirmed by the account stream either way.
+  # Lighter 吃单发送方式：http（默认）或 ws（本地签名后走常连 websocket，断线自动改走 HTTP）
+  order_transport: http
+  ws_reply_timeout_sec: 1.5    # wait this long for the ws reply / 等待 ws 回执的时间
 
 # ===================== MAKER MODE / 挂单模式 ===============================
 # Only used with  python3 main.py --mode maker ...  (the default taker mode

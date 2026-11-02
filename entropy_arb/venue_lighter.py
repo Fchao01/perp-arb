@@ -31,6 +31,7 @@ except ImportError:
 from .book import OrderBook
 from .config import VenueConf
 from .feeds import LighterBookFeed
+from .ws_tx import WsNotReady, WsTxSender, reply_error
 
 log = logging.getLogger("lighter")
 
@@ -154,8 +155,15 @@ class LighterVenue:
     kind = "lighter"
 
     def __init__(self, conf: VenueConf, session: aiohttp.ClientSession,
-                 settle_timeout_sec: float) -> None:
+                 settle_timeout_sec: float, order_transport: str = "http",
+                 ws_reply_timeout_sec: float = 1.5) -> None:
         assert conf.lighter_profile is not None
+        assert order_transport in ("http", "ws"), order_transport
+        self.order_transport = order_transport
+        self.ws_reply_timeout = ws_reply_timeout_sec
+        self.tx_ws: Optional[WsTxSender] = None
+        # (sign_ms, write_ms, reply_ms or None) of recent websocket sends
+        self.ws_send_stats: list = []
         self.conf = conf
         self.key = conf.key
         self.name = conf.label
@@ -247,6 +255,17 @@ class LighterVenue:
                 self.conf.lighter_creds.account_index, self.signer)
             tasks.append(asyncio.create_task(self.orders_feed.run(stop),
                                              name=f"acct-{self.key}"))
+            nm = getattr(self.signer, "nonce_manager", None)
+            if self.order_transport == "ws" and not all(
+                    hasattr(nm, a) for a in ("lock", "async_next_nonce",
+                                             "async_hard_refresh_nonce")):
+                log.warning("[%s] this lighter SDK has no async nonce lock; "
+                            "order_transport ws needs a newer SDK — using "
+                            "HTTP", self.name)
+            elif self.order_transport == "ws":
+                self.tx_ws = WsTxSender(self.name, self.profile.ws_url)
+                tasks.append(asyncio.create_task(self.tx_ws.run(stop),
+                                                 name=f"txws-{self.key}"))
         return tasks
 
     def ready_to_trade(self) -> bool:
@@ -318,36 +337,27 @@ class LighterVenue:
         fut = self.orders_feed.watch(coi) if self.orders_feed else None
         base_amount = int(round(qty * 10 ** self.size_decimals))
         price = int(round(limit_px * 10 ** self.price_decimals))
-        try:
-            _tx, resp, err = await self.signer.create_order(
-                market_index=self.market_id,
-                client_order_index=coi,
-                base_amount=base_amount,
-                price=price,
-                is_ask=not is_buy,
-                order_type=(SignerClient.ORDER_TYPE_LIMIT if limit_ioc
-                            else SignerClient.ORDER_TYPE_MARKET),
-                time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
-                reduce_only=reduce_only,
-                order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
-            )
-        except Exception as e:
+        order_kw = dict(
+            market_index=self.market_id,
+            client_order_index=coi,
+            base_amount=base_amount,
+            price=price,
+            is_ask=not is_buy,
+            order_type=(SignerClient.ORDER_TYPE_LIMIT if limit_ioc
+                        else SignerClient.ORDER_TYPE_MARKET),
+            time_in_force=SignerClient.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+            reduce_only=reduce_only,
+            order_expiry=SignerClient.DEFAULT_IOC_EXPIRY,
+        )
+        if self.tx_ws is not None and self.tx_ws.ready.is_set():
+            msg, ack_mono = await self._submit_ws(order_kw, coi)
+        else:
+            msg, ack_mono = await self._submit_http(order_kw)
+        if ack_mono is not None:
+            ack_ts = started_ts + (ack_mono - started_mono)
+        if msg is not None:
             if fut is not None:
                 self.orders_feed.unwatch(coi)
-            msg = f"{type(e).__name__}: {e}"
-            if getattr(e, "status", None) == 429 or "(429)" in str(e):
-                msg = "RATE_LIMITED: " + msg
-            return finish({"status": "send-failed", "filled_base": 0.0,
-                           "avg_px": None, "err": msg, "unresolved": False})
-        ack_mono = time.monotonic()
-        ack_ts = time.time()
-        if err is not None or (getattr(resp, "code", 200) or 200) != 200:
-            if fut is not None:
-                self.orders_feed.unwatch(coi)
-            msg = str(err) if err is not None else \
-                f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
-            if "rate limit" in msg.lower():
-                msg = "RATE_LIMITED: " + msg
             return finish({"status": "send-failed", "filled_base": 0.0,
                            "avg_px": None, "err": msg, "unresolved": False})
         if fut is None:
@@ -366,6 +376,94 @@ class LighterVenue:
                         self.name, coi, self.settle_timeout)
             return finish({"status": "timeout", "filled_base": 0.0,
                            "avg_px": None, "err": None, "unresolved": True})
+
+    async def _submit_http(self, order_kw: dict):
+        """SDK create_order (sign + HTTPS sendTx) -> (error text or None,
+        ack time or None when the request itself failed)."""
+        try:
+            _tx, resp, err = await self.signer.create_order(**order_kw)
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            if getattr(e, "status", None) == 429 or "(429)" in str(e):
+                msg = "RATE_LIMITED: " + msg
+            return msg, None
+        ack = time.monotonic()
+        if err is not None or (getattr(resp, "code", 200) or 200) != 200:
+            msg = str(err) if err is not None else \
+                f"tx rejected code={resp.code} msg={getattr(resp, 'message', None)}"
+            if "rate limit" in msg.lower():
+                msg = "RATE_LIMITED: " + msg
+            return msg, ack
+        return None, ack
+
+    async def _submit_ws(self, order_kw: dict, coi: int):
+        """Sign locally, write a sendtx frame on the tx websocket ->
+        (error text or None, ack time). None means the exchange did not
+        reject it (fills still come from the account stream); the ack is the
+        reply, or the frame write when no reply arrives. If the frame cannot
+        be written, the same signed transaction goes over HTTP."""
+        signer = self.signer
+        nm = signer.nonce_manager
+        t0 = time.monotonic()
+        api_key = nm.rotate_key()
+        async with nm.lock(api_key):
+            _, nonce = await nm.async_next_nonce(api_key)
+            tx_type, tx_info, _hash, err = signer.sign_create_order(
+                **order_kw, nonce=nonce, api_key_index=api_key)
+            t_signed = time.monotonic()
+            if err is not None:
+                nm.acknowledge_failure(api_key)
+                return str(err), None
+            try:
+                reply = await self.tx_ws.send(tx_type, tx_info)
+            except Exception as e:
+                # not written: send the very same signed tx over HTTP, which
+                # keeps the nonce sequence intact
+                log.warning("[%s] tx websocket send failed (%s), coi %d "
+                            "over HTTP", self.name, e, coi)
+                try:
+                    resp = await signer.send_tx(tx_type=tx_type, tx_info=tx_info)
+                except Exception as e2:
+                    await self._resync_nonce(api_key)
+                    return self._tx_error(None, f"{type(e2).__name__}: {e2}"), None
+                msg = self._tx_error(resp, None)
+                if msg is not None:
+                    await self._resync_nonce(api_key)
+                return msg, time.monotonic()
+        t_written = time.monotonic()
+        reply_ms = None
+        msg = None
+        try:
+            raw = await asyncio.wait_for(reply, timeout=self.ws_reply_timeout)
+            reply_ms = (time.monotonic() - t_written) * 1000.0
+            msg = reply_error(raw)
+        except asyncio.TimeoutError:
+            log.warning("[%s] no tx websocket reply for coi %d in %.1fs; "
+                        "waiting for the account stream", self.name, coi,
+                        self.ws_reply_timeout)
+        except WsNotReady:
+            log.warning("[%s] tx websocket closed before replying to coi %d; "
+                        "waiting for the account stream", self.name, coi)
+        if msg is not None:
+            async with nm.lock(api_key):
+                await self._resync_nonce(api_key)
+        stat = ((t_signed - t0) * 1000.0, (t_written - t_signed) * 1000.0,
+                reply_ms)
+        self.ws_send_stats = (self.ws_send_stats + [stat])[-200:]
+        log.info("[%s] ws order coi %d: sign %.1fms write %.1fms reply %s%s",
+                 self.name, coi, stat[0], stat[1],
+                 f"{reply_ms:.1f}ms" if reply_ms is not None else "—",
+                 f" REJECTED {msg}" if msg else "")
+        ack = t_written + reply_ms / 1000.0 if reply_ms is not None else t_written
+        return msg, ack
+
+    async def _resync_nonce(self, api_key: int) -> None:
+        """After a rejection the local nonce may be ahead of the exchange's
+        (later orders may already have used the next ones), so refetch."""
+        try:
+            await self.signer.nonce_manager.async_hard_refresh_nonce(api_key)
+        except Exception as e:
+            log.warning("[%s] nonce refresh failed: %r", self.name, e)
 
     # ------------------------------------------------------- resting orders
 
