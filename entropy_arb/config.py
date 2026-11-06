@@ -203,6 +203,11 @@ class Config:
     # how Lighter taker orders are sent: "http" (SDK sendTx) or "ws"
     order_transport: str = "http"
     ws_reply_timeout_sec: float = 1.5
+    # only fire signals created by this book's update: any | hedge | primary
+    signal_source: str = "any"
+    # taker price protection for the hedge venue's arbitrage leg
+    # (None = leg_slippage_bps, same as the primary leg)
+    hedge_leg_slippage_bps: Optional[float] = None
 
     @property
     def creds_complete(self) -> bool:
@@ -270,6 +275,8 @@ _SCHEMA: Dict[str, Any] = {
         "http_keepalive_sec": float,
         "order_transport": str,
         "ws_reply_timeout_sec": float,
+        "signal_source": str,
+        "hedge_leg_slippage_bps": float,
     },
     "recorder": {
         "enabled": bool,
@@ -568,6 +575,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     ws_reply_timeout = float(_get(raw, "execution", "ws_reply_timeout_sec", 1.5))
     if not ws_reply_timeout > 0:
         raise ConfigError("execution.ws_reply_timeout_sec must be > 0")
+    signal_source = str(_get(raw, "execution", "signal_source", "any")).lower()
+    if signal_source not in ("any", "hedge", "primary"):
+        raise ConfigError("execution.signal_source must be any, hedge or primary "
+                          "/ 只能是 any、hedge 或 primary")
+    hedge_leg_slip = _get(raw, "execution", "hedge_leg_slippage_bps", None)
+    if hedge_leg_slip is not None:
+        hedge_leg_slip = float(hedge_leg_slip)
+        if hedge_leg_slip < 0:
+            raise ConfigError("execution.hedge_leg_slippage_bps must be >= 0")
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -617,4 +633,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
             raw, float(_get(raw, "sizing", "min_order_notional_usd", 10.0))),
         order_transport=transport,
         ws_reply_timeout_sec=ws_reply_timeout,
+        signal_source=signal_source,
+        hedge_leg_slippage_bps=hedge_leg_slip,
     )

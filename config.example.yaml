@@ -132,6 +132,16 @@ execution:
   # Lighter 吃单发送方式：http（默认）或 ws（本地签名后走常连 websocket，断线自动改走 HTTP）
   order_transport: http
   ws_reply_timeout_sec: 1.5    # wait this long for the ws reply / 等待 ws 回执的时间
+  # Only fire signals created by this book's update: any (default), hedge
+  # (the hedge book moved last, so the stale leg is the primary) or primary.
+  # 只做由哪边盘口更新触发的信号：any（默认，都做）、hedge（对冲所先动）、primary
+  signal_source: any
+  # Taker price protection for the hedge venue's leg only; unset = same as
+  # leg_slippage_bps. A miss caused by this tighter limit is repaired by the
+  # net-delta hedge and does not count toward max_consecutive_errors.
+  # 对冲所那条腿单独的滑点保护；不设则与 leg_slippage_bps 相同。因此漏单会由补对冲修复，
+  # 不计入连续错误停机次数。
+  # hedge_leg_slippage_bps: 3.0
 
 # ===================== MAKER MODE / 挂单模式 ===============================
 # Only used with  python3 main.py --mode maker ...  (the default taker mode

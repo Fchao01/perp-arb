@@ -278,6 +278,10 @@ def report(rows: List[dict], hedge_rows: Optional[List[dict]],
                     + [f">={premium_edges[-1]:g}"])
     print_breakdown("By which book updated last / 决策前哪边盘口最后更新",
                     rows, last_updated, ["hedge", "primary"])
+    if any(r.get("signal_source") for r in rows):
+        print_breakdown("By which book created the signal / 信号由哪边盘口触发",
+                        rows, lambda r: r.get("signal_source") or None,
+                        ["hedge", "primary"])
     print_breakdown("By UTC hour / 按小时", rows,
                     lambda r: f"{utc(_f(r.get('ts')) or 0):%H}h")
     print_breakdown("By UTC day / 按日期", rows,

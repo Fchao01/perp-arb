@@ -57,7 +57,8 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "sell_submit_latency_ms", "buy_confirm_latency_ms",
               "sell_confirm_latency_ms", "buy_total_latency_ms",
               "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty",
-              "buy_feed_lag_ms", "sell_feed_lag_ms", "signal_age_ms"]
+              "buy_feed_lag_ms", "sell_feed_lag_ms", "signal_age_ms",
+              "signal_source"]
 HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
                 "filled_qty", "status", "limit_px", "avg_px", "fee_bps",
                 "fee_usd", "client_order_id", "exchange_order_id",
@@ -119,6 +120,12 @@ class Engine:
                                                    "buy_entropy": None}
         # signal age (s) of the execution _scan last chose
         self._fire_age: Optional[float] = None
+        # which book's update created each armed signal ("primary"/"hedge")
+        self._armed_src: Dict[str, Optional[str]] = {"sell_entropy": None,
+                                                     "buy_entropy": None}
+        self._fire_src: Optional[str] = None
+        self._src_skipped: Dict[str, Optional[float]] = {}
+        self.skipped_by_source = 0
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -353,6 +360,14 @@ class Engine:
             base = self.cfg.lower_bps - midline
         return base + self._inv_add_bps(buy, sell)
 
+    def _leg_slip_bps(self, v) -> float:
+        """Taker price protection for one arbitrage leg: the hedge venue can
+        have its own (hedge_leg_slippage_bps); otherwise leg_slippage_bps."""
+        hs = self.cfg.hedge_leg_slippage_bps
+        if hs is not None and v.key == "hedge":
+            return hs
+        return self.cfg.leg_slippage_bps
+
     def _lead_leg(self, buy, sell):
         """The venue sent first in sequential mode, or None (concurrent)."""
         key = {"primary": "entropy", "hedge": "hedge"}.get(self.cfg.lead_venue)
@@ -404,6 +419,14 @@ class Engine:
 
         self._poke_due = due
         loop.call_at(due, _fire)
+
+    def _signal_source(self) -> str:
+        """Which book changed last, i.e. whose update created a signal that
+        is being armed now: "hedge" or "primary" (a tie counts as primary,
+        the conservative side when signal_source: hedge)."""
+        p = self.entropy.book.last_update_ts or 0.0
+        h = self.hedge.book.last_update_ts or 0.0
+        return "hedge" if h > p else "primary"
 
     def _skiplog(self, fmt: str, *args) -> None:
         now = time.time()
@@ -490,6 +513,7 @@ class Engine:
             edge_present = reason not in ("no_edge", "empty_book")
             if not edge_present:
                 self._armed[dkey] = None
+                self._armed_src[dkey] = None
                 continue
             tiers = cfg.persist_tiers
             need = tiers[0][0] if tiers else cfg.premium_persist_sec
@@ -499,11 +523,21 @@ class Engine:
                 # gate (filters one-tick phantoms); with persist_tiers the
                 # gate is the first tier's age
                 self._armed[dkey] = now
+                self._armed_src[dkey] = self._signal_source()
                 self._schedule_poke(need)
                 continue
             age = now - armed
             if age < need:
                 self._schedule_poke(need - age)
+                continue
+            src = self._armed_src.get(dkey)
+            if cfg.signal_source != "any" and src != cfg.signal_source:
+                if self._src_skipped.get(dkey) != armed:  # count each signal once
+                    self._src_skipped[dkey] = armed
+                    self.skipped_by_source += 1
+                    self._skiplog("%s skipped: signal came from the %s book "
+                                  "(signal_source: %s)", dkey, src,
+                                  cfg.signal_source)
                 continue
             cap = cfg.max_order_notional
             if tiers:
@@ -524,6 +558,7 @@ class Engine:
             if best is None or plan.exp_edge_usd > best[2].exp_edge_usd:
                 best = (buy, sell, plan)
                 self._fire_age = age
+                self._fire_src = src
         return best
 
     # ------------------------------------------------------------- execution
@@ -563,17 +598,21 @@ class Engine:
         direction = "sell_entropy" if sell.key == "entropy" else "buy_entropy"
         self.last_trade_ts = time.time()
         signal_age = self._fire_age
+        signal_src = self._fire_src
         log.info("[ARB] %s: BUY %s %.6g @<=%.6g | SELL %s @>=%.6g | "
-                 "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f | age %s",
+                 "take $%.0f of $%.0f | prem %.2fbps | exp $%.4f | age %s | src %s",
                  direction, buy.name, plan.qty, plan.buy_limit, sell.name,
                  plan.sell_limit, plan.buy_notional, plan.q_max_notional,
                  plan.marginal_premium_bps, plan.exp_edge_usd,
-                 f"{signal_age * 1000:.0f}ms" if signal_age is not None else "—")
+                 f"{signal_age * 1000:.0f}ms" if signal_age is not None else "—",
+                 signal_src or "—")
         book_snapshot["signal_age_ms"] = (signal_age * 1000.0
                                           if signal_age is not None else None)
-        slip = cfg.leg_slippage_bps / 1e4
-        buy_bound = buy.px_round(plan.buy_limit * (1 + slip), round_up=False)
-        sell_bound = sell.px_round(plan.sell_limit * (1 - slip), round_up=True)
+        book_snapshot["signal_source"] = signal_src or ""
+        bslip = self._leg_slip_bps(buy) / 1e4
+        sslip = self._leg_slip_bps(sell) / 1e4
+        buy_bound = buy.px_round(plan.buy_limit * (1 + bslip), round_up=False)
+        sell_bound = sell.px_round(plan.sell_limit * (1 - sslip), round_up=True)
 
         async def send_leg(v, *, is_buy, qty, limit_px, limit_ioc=False):
             self._record_send(v)
@@ -683,7 +722,21 @@ class Engine:
                             "pausing venue", v.name)
                 self._mark_limited(v)
         problem = hard_err or unresolved or imbalanced
-        if not problem:
+        # With hedge_leg_slippage_bps the hedge leg is allowed to miss on
+        # purpose (price ran past its tighter protection); the repair hedge
+        # fixes the imbalance, so such a miss neither counts toward the halt
+        # nor resets the streak.
+        hinfo = binfo if buy.key == "hedge" else sinfo
+        hfill = bfill if buy.key == "hedge" else sfill
+        ofill = sfill if buy.key == "hedge" else bfill
+        planned_miss = (cfg.hedge_leg_slippage_bps is not None
+                        and imbalanced and not hard_err and not unresolved
+                        and not hinfo.get("err") and hfill < ofill)
+        if planned_miss:
+            log.info("[ARB] hedge leg %s missed its %.1f bps protection "
+                     "(%s) — repairing", self.hedge.name,
+                     cfg.hedge_leg_slippage_bps, hinfo.get("status"))
+        elif not problem:
             self.consec_errors = 0
         elif not rate_limited:
             self.consec_errors += 1
@@ -1096,7 +1149,9 @@ class Engine:
                      books, prem_s, band_s, pos, net, self.trades,
                      self.hedges,
                      f"${pnl:+.4f}" if pnl is not None else "—",
-                     self.total_exp_edge, self.total_fill_edge, rec,
+                     self.total_exp_edge, self.total_fill_edge,
+                     rec + (f" | src-skipped {self.skipped_by_source}"
+                            if cfg.signal_source != "any" else ""),
                      self.feed_lag_text(),
                      " *** HALTED ***" if self.halted else "")
 
@@ -1195,7 +1250,8 @@ class Engine:
                             self._csv_value(abs(bfill - sfill)),
                             self._csv_value(book_snapshot.get("buy_feed_lag_ms"), 3),
                             self._csv_value(book_snapshot.get("sell_feed_lag_ms"), 3),
-                            self._csv_value(book_snapshot.get("signal_age_ms"), 1)])
+                            self._csv_value(book_snapshot.get("signal_age_ms"), 1),
+                            book_snapshot.get("signal_source", "")])
         except Exception:
             log.exception("csv write failed")
 
