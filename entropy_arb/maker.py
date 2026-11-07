@@ -45,7 +45,7 @@ from typing import Deque, Dict, Optional, Tuple
 
 from .book import floor_step
 from .center import CenterTracker
-from .config import parse_window
+from .schedule import Blackout, parse_window  # noqa: F401 (re-export)
 from .engine import Engine
 
 log = logging.getLogger("maker")
@@ -98,33 +98,6 @@ class WindowRange:
             return 0.0
         hi, lo = self._hi[0][1], self._lo[0][1]
         return max(hi / current - 1.0, 1.0 - lo / current) * 1e4
-
-
-class Blackout:
-    """Weekday time-of-day windows in a named time zone (DST-aware)."""
-
-    def __init__(self, windows, tz_name: str) -> None:
-        self.windows = [(w, *parse_window(w)) for w in windows]
-        self.tz = timezone.utc
-        if self.windows:
-            try:
-                from zoneinfo import ZoneInfo
-                self.tz = ZoneInfo(tz_name)
-            except Exception:
-                log.warning("time zone %r unavailable — blackout windows are "
-                            "read as UTC", tz_name)
-
-    def active(self, ts: float) -> Optional[str]:
-        if not self.windows:
-            return None
-        dt = datetime.fromtimestamp(ts, self.tz)
-        if dt.weekday() >= 5:
-            return None
-        m = dt.hour * 60 + dt.minute
-        for text, a, b in self.windows:
-            if (a <= m < b) if a < b else (m >= a or m < b):
-                return text
-        return None
 
 
 def round_to_tick(px: float, tick: float, up: bool) -> float:

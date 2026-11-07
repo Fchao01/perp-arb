@@ -34,6 +34,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .center import CenterTracker
 from .config import Config
 from .recorder import MinuteRecorder
+from .schedule import Blackout
 from .telegram import TelegramNotifier, trade_message
 from .venue_hl import HLVenue
 from .venue_lighter import LighterVenue
@@ -126,6 +127,13 @@ class Engine:
         self._fire_src: Optional[str] = None
         self._src_skipped: Dict[str, Optional[float]] = {}
         self.skipped_by_source = 0
+        self.pause = Blackout(cfg.pause_windows, cfg.pause_tz)
+        self._paused_in: Optional[str] = None
+        self._imbalance_blocked = False
+        # repair hedges: consecutive attempts that did not fully fill
+        self._hedge_streak = 0
+        self._hedge_next_ts = 0.0
+        self._hedge_alerted = False
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -488,6 +496,24 @@ class Engine:
                 log.info("auto midline warming up (%g min) — no trades until "
                          "then", cfg.midline_warmup_min)
             return None
+        window = self.pause.active(time.time())
+        if window != self._paused_in:
+            if window:
+                log.info("pause window %s (%s) — no new arbitrage until it "
+                         "ends; repair hedges continue / 暂停时段，不开新单",
+                         window, cfg.pause_tz)
+            elif self._paused_in:
+                log.info("pause window %s over — trading resumes / 暂停结束",
+                         self._paused_in)
+            self._paused_in = window
+        blocked = bool(window) or self._open_imbalance()
+        if blocked:
+            # a signal must start fresh afterwards, so its age (and size)
+            # never includes the paused time
+            for k in self._armed:
+                self._armed[k] = None
+                self._armed_src[k] = None
+            return None
         best = None
         for buy, sell, dkey in ((self.hedge, self.entropy, "sell_entropy"),
                                 (self.entropy, self.hedge, "buy_entropy")):
@@ -849,10 +875,67 @@ class Engine:
             known = False
         return (pnl if known and source_ids else None), list(dict.fromkeys(source_ids))
 
+    def _open_imbalance(self) -> bool:
+        """True while the venues are out of balance by a hedgeable amount:
+        no new arbitrage until the repair hedge has fixed it, so a failed
+        leg cannot be stacked on by the next signal. A residual too small
+        to trade does not block."""
+        net = sum(v.position for v in self.venues.values())
+        blocked = False
+        if abs(net) > self.cfg.net_tolerance_base:
+            mid = self.entropy.book.mid()
+            blocked = (mid is not None and abs(net) >= self._min_base
+                       and abs(net) * mid >= self.cfg.min_order_notional)
+        if blocked != self._imbalance_blocked:
+            self._imbalance_blocked = blocked
+            if blocked:
+                log.warning("net %+.6g open — no new arbitrage until it is "
+                            "hedged / 净敞口未补平，暂停开新单", net)
+            else:
+                log.info("net back within tolerance — trading resumes")
+        return blocked
+
     async def _maybe_hedge(self, source_trade_id: Optional[str] = None) -> None:
         net = sum(v.position for v in self.venues.values())
-        if abs(net) > self.cfg.net_tolerance_base:
-            await self._hedge(net, source_trade_id)
+        if abs(net) <= self.cfg.net_tolerance_base:
+            self._hedge_streak = 0
+            self._hedge_next_ts = 0.0
+            self._hedge_alerted = False
+            return
+        if time.time() < self._hedge_next_ts:
+            return  # backing off after repeated failures
+        await self._hedge(net, source_trade_id)
+
+    HEDGE_ALERT_AFTER = 8          # failed repair attempts before alerting
+    HEDGE_BACKOFF_MAX_SEC = 60.0
+
+    def _hedge_slip_bps(self) -> float:
+        """hedge_slippage_bps, doubled per consecutive failed attempt, up to
+        hedge_slippage_max_bps: a repair that cannot fill at a tight price
+        must get more aggressive, not resend the same order forever."""
+        cfg = self.cfg
+        return min(cfg.hedge_slippage_bps * (2 ** self._hedge_streak),
+                   cfg.hedge_slippage_max_bps)
+
+    def _hedge_outcome(self, ok: bool, net: float, v, why: str) -> None:
+        if ok:
+            self._hedge_streak = 0
+            self._hedge_next_ts = 0.0
+            self._hedge_alerted = False
+            return
+        self._hedge_streak += 1
+        n = self._hedge_streak
+        # retry at once for the first few, then back off up to a minute
+        delay = 0.0 if n < 3 else min(2.0 ** (n - 2), self.HEDGE_BACKOFF_MAX_SEC)
+        self._hedge_next_ts = time.time() + delay
+        if n >= self.HEDGE_ALERT_AFTER and not self._hedge_alerted:
+            self._hedge_alerted = True
+            msg = (f"[{self.cfg.symbol}] repair hedge failed {n} times in a row "
+                   f"({v.name}: {why}); net {net:+.6g} still open — check the "
+                   f"venue / 补对冲连续失败 {n} 次，净敞口 {net:+.6g} 仍未补平")
+            log.critical(msg)
+            if self.cfg.telegram.enabled:
+                self.telegram.enqueue(msg)
 
     async def _hedge(self, net: float,
                      source_trade_id: Optional[str] = None) -> None:
@@ -861,7 +944,7 @@ class Engine:
         cfg = self.cfg
         is_sell = net > 0
         sgn = 1.0 if net > 0 else -1.0
-        slip = cfg.hedge_slippage_bps / 1e4
+        slip = self._hedge_slip_bps() / 1e4
         for v in sorted(self.venues.values(),
                         key=lambda x: (self._venue_limited(x), -x.position * sgn)):
             if v.position * sgn <= 0:
@@ -884,8 +967,11 @@ class Engine:
                 continue
             await lk.acquire()  # verified free, no awaits since: fast path
             try:
-                log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g",
-                            net, "SELL" if is_sell else "BUY", qty, v.name, limit)
+                log.warning("[HEDGE] net %+.6g — %s %.6g on %s @%.6g "
+                            "(protection %.1f bps%s)",
+                            net, "SELL" if is_sell else "BUY", qty, v.name, limit,
+                            slip * 1e4, f", attempt {self._hedge_streak + 1}"
+                            if self._hedge_streak else "")
                 self.hedges += 1
                 self._record_send(v)  # counts toward the budget, never blocked
                 info = await v.send_taker(is_buy=not is_sell, qty=qty,
@@ -901,7 +987,11 @@ class Engine:
                     if str(info.get("err", "")).startswith("RATE_LIMITED"):
                         self._mark_limited(v)
                     self._reconcile_evt.set()
+                    self._hedge_outcome(False, net, v,
+                                        str(info.get("err") or info.get("status")))
                 else:
+                    self._hedge_outcome(fill >= qty - 1e-12, net, v,
+                                        str(info.get("status")))
                     v.position += -fill if is_sell else fill
                     if fill:
                         accounting_px = px or limit
@@ -1151,7 +1241,11 @@ class Engine:
                      f"${pnl:+.4f}" if pnl is not None else "—",
                      self.total_exp_edge, self.total_fill_edge,
                      rec + (f" | src-skipped {self.skipped_by_source}"
-                            if cfg.signal_source != "any" else ""),
+                            if cfg.signal_source != "any" else "")
+                     + (f" | PAUSED {self._paused_in}" if self._paused_in else "")
+                     + (" | NET OPEN, no new arbs" if self._imbalance_blocked else "")
+                     + (f" | hedge fails {self._hedge_streak}"
+                        if self._hedge_streak else ""),
                      self.feed_lag_text(),
                      " *** HALTED ***" if self.halted else "")
 

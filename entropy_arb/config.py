@@ -208,6 +208,12 @@ class Config:
     # taker price protection for the hedge venue's arbitrage leg
     # (None = leg_slippage_bps, same as the primary leg)
     hedge_leg_slippage_bps: Optional[float] = None
+    # no new arbitrage in these weekday windows ("HH:MM-HH:MM" in pause_tz);
+    # repair hedges still run
+    pause_windows: tuple = ()
+    pause_tz: str = "America/New_York"
+    # repair hedges widen hedge_slippage_bps x2 per failed attempt up to this
+    hedge_slippage_max_bps: float = 40.0
 
     @property
     def creds_complete(self) -> bool:
@@ -277,6 +283,9 @@ _SCHEMA: Dict[str, Any] = {
         "ws_reply_timeout_sec": float,
         "signal_source": str,
         "hedge_leg_slippage_bps": float,
+        "pause_windows": "list[str]",
+        "pause_tz": str,
+        "hedge_slippage_max_bps": float,
     },
     "recorder": {
         "enabled": bool,
@@ -364,23 +373,9 @@ def _validate(node: Any, schema: Dict[str, Any], path: str = "") -> None:
                                   f"got {val!r} / 必须是数字或 auto")
 
 
-def parse_window(text: str):
-    """'HH:MM-HH:MM' -> (start_min, end_min); end < start wraps midnight."""
-    try:
-        a, b = text.split("-")
-        out = []
-        for part in (a, b):
-            h, m = part.strip().split(":")
-            h, m = int(h), int(m)
-            if not (0 <= h < 24 and 0 <= m < 60):
-                raise ValueError
-            out.append(h * 60 + m)
-    except ValueError:
-        raise ConfigError(f"maker.blackout_windows entry {text!r} must look "
-                          f"like '15:55-16:45' / 格式应为 '15:55-16:45'")
-    if out[0] == out[1]:
-        raise ConfigError(f"maker.blackout_windows entry {text!r} is empty")
-    return out[0], out[1]
+def parse_window(text: str, key: str = "maker.blackout_windows"):
+    from .schedule import parse_window as _pw
+    return _pw(text, key)
 
 
 def _load_maker(raw: dict, symbol: str) -> MakerConf:
@@ -584,6 +579,23 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_leg_slip = float(hedge_leg_slip)
         if hedge_leg_slip < 0:
             raise ConfigError("execution.hedge_leg_slippage_bps must be >= 0")
+    pause_windows = tuple(_get(raw, "execution", "pause_windows", ()) or ())
+    for w in pause_windows:
+        parse_window(w, "execution.pause_windows")
+    pause_tz = str(_get(raw, "execution", "pause_tz", "America/New_York"))
+    if pause_windows:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(pause_tz)
+        except Exception:
+            raise ConfigError(f"execution.pause_tz {pause_tz!r} is not a known "
+                              f"time zone / 未知时区")
+    hedge_slip = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
+    hedge_slip_max = float(_get(raw, "execution", "hedge_slippage_max_bps",
+                                max(40.0, hedge_slip)))
+    if hedge_slip_max < hedge_slip:
+        raise ConfigError("execution.hedge_slippage_max_bps must be >= "
+                          "hedge_slippage_bps / 不能小于 hedge_slippage_bps")
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -635,4 +647,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         ws_reply_timeout_sec=ws_reply_timeout,
         signal_source=signal_source,
         hedge_leg_slippage_bps=hedge_leg_slip,
+        pause_windows=pause_windows,
+        pause_tz=pause_tz,
+        hedge_slippage_max_bps=hedge_slip_max,
     )

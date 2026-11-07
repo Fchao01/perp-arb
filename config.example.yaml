@@ -142,6 +142,18 @@ execution:
   # 对冲所那条腿单独的滑点保护；不设则与 leg_slippage_bps 相同。因此漏单会由补对冲修复，
   # 不计入连续错误停机次数。
   # hedge_leg_slippage_bps: 3.0
+  # No new arbitrage inside these weekday windows ("HH:MM-HH:MM" in pause_tz,
+  # DST-aware); repair hedges keep running. New York time: data releases
+  # 08:30, the open 09:30, the close 16:00.
+  # 工作日这些时段不开新单（按 pause_tz 时区，自动处理夏令时），补对冲照常进行。
+  # 纽约时间：经济数据 08:30、开盘 09:30、收盘 16:00。
+  # pause_windows: ["08:25-08:45", "09:25-09:50", "15:55-16:05"]
+  # pause_tz: America/New_York
+  # Repair hedges double their price protection after each failed attempt,
+  # up to this cap, back off up to a minute between retries, and alert after
+  # 8 failures in a row. 补对冲每失败一次保护价翻倍，直到此上限；重试间隔逐步拉长到 1 分钟，
+  # 连续失败 8 次告警。
+  # hedge_slippage_max_bps: 40.0
 
 # ===================== MAKER MODE / 挂单模式 ===============================
 # Only used with  python3 main.py --mode maker ...  (the default taker mode
