@@ -142,6 +142,8 @@ execution:
   # 对冲所那条腿单独的滑点保护；不设则与 leg_slippage_bps 相同。因此漏单会由补对冲修复，
   # 不计入连续错误停机次数。
   # hedge_leg_slippage_bps: 3.0
+  # The same for the primary venue's leg / 主所那条腿单独的滑点保护，规则同上
+  # primary_leg_slippage_bps: 3.0
   # No new arbitrage inside these weekday windows ("HH:MM-HH:MM" in pause_tz,
   # DST-aware); repair hedges keep running. New York time: data releases
   # 08:30, the open 09:30, the close 16:00.

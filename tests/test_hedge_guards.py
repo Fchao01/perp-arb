@@ -131,6 +131,27 @@ def test_hedge_miss_still_counts_without_the_option():
     assert eng.consec_errors == 1
 
 
+def test_primary_leg_gets_its_own_protection_and_miss_is_neutral():
+    ex = ("  leg_slippage_bps: 10.0\n  primary_leg_slippage_bps: 3.0\n"
+          "  max_consecutive_errors: 2")
+    eng, rh, lt = run_exec(ex, [1.0], [1.0])
+    assert rh.orders[0]["limit_px"] == round(100.1 * 0.9997, 2)   # sell RH
+    assert lt.orders[0]["limit_px"] == round(100.0 * 1.001, 2)    # LIGHTER 10
+    eng, rh, lt = run_exec(ex, [MISS], [1.0])
+    assert eng.consec_errors == 0 and not eng.halted
+    eng, rh, lt = run_exec(ex, [1.0], [MISS])                     # LIGHTER: no own
+    assert eng.consec_errors == 1
+
+
+def test_both_legs_tight():
+    ex = ("  leg_slippage_bps: 10.0\n  primary_leg_slippage_bps: 2.0\n"
+          "  hedge_leg_slippage_bps: 3.0")
+    eng, rh, lt = run_exec(ex, [1.0], [MISS])
+    assert eng.consec_errors == 0
+    eng, rh, lt = run_exec(ex, [MISS], [1.0])
+    assert eng.consec_errors == 0
+
+
 def test_primary_miss_still_counts_with_the_option():
     eng, rh, lt = run_exec("  leg_slippage_bps: 10.0\n"
                            "  hedge_leg_slippage_bps: 3.0", [MISS], [1.0])

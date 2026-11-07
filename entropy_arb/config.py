@@ -208,6 +208,8 @@ class Config:
     # taker price protection for the hedge venue's arbitrage leg
     # (None = leg_slippage_bps, same as the primary leg)
     hedge_leg_slippage_bps: Optional[float] = None
+    # the same for the primary venue's leg (None = leg_slippage_bps)
+    primary_leg_slippage_bps: Optional[float] = None
     # no new arbitrage in these weekday windows ("HH:MM-HH:MM" in pause_tz);
     # repair hedges still run
     pause_windows: tuple = ()
@@ -283,6 +285,7 @@ _SCHEMA: Dict[str, Any] = {
         "ws_reply_timeout_sec": float,
         "signal_source": str,
         "hedge_leg_slippage_bps": float,
+        "primary_leg_slippage_bps": float,
         "pause_windows": "list[str]",
         "pause_tz": str,
         "hedge_slippage_max_bps": float,
@@ -579,6 +582,11 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         hedge_leg_slip = float(hedge_leg_slip)
         if hedge_leg_slip < 0:
             raise ConfigError("execution.hedge_leg_slippage_bps must be >= 0")
+    primary_leg_slip = _get(raw, "execution", "primary_leg_slippage_bps", None)
+    if primary_leg_slip is not None:
+        primary_leg_slip = float(primary_leg_slip)
+        if primary_leg_slip < 0:
+            raise ConfigError("execution.primary_leg_slippage_bps must be >= 0")
     pause_windows = tuple(_get(raw, "execution", "pause_windows", ()) or ())
     for w in pause_windows:
         parse_window(w, "execution.pause_windows")
@@ -647,6 +655,7 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         ws_reply_timeout_sec=ws_reply_timeout,
         signal_source=signal_source,
         hedge_leg_slippage_bps=hedge_leg_slip,
+        primary_leg_slippage_bps=primary_leg_slip,
         pause_windows=pause_windows,
         pause_tz=pause_tz,
         hedge_slippage_max_bps=hedge_slip_max,

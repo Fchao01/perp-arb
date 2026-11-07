@@ -371,10 +371,9 @@ class Engine:
     def _leg_slip_bps(self, v) -> float:
         """Taker price protection for one arbitrage leg: the hedge venue can
         have its own (hedge_leg_slippage_bps); otherwise leg_slippage_bps."""
-        hs = self.cfg.hedge_leg_slippage_bps
-        if hs is not None and v.key == "hedge":
-            return hs
-        return self.cfg.leg_slippage_bps
+        own = (self.cfg.hedge_leg_slippage_bps if v.key == "hedge"
+               else self.cfg.primary_leg_slippage_bps)
+        return own if own is not None else self.cfg.leg_slippage_bps
 
     def _lead_leg(self, buy, sell):
         """The venue sent first in sequential mode, or None (concurrent)."""
@@ -752,16 +751,18 @@ class Engine:
         # purpose (price ran past its tighter protection); the repair hedge
         # fixes the imbalance, so such a miss neither counts toward the halt
         # nor resets the streak.
-        hinfo = binfo if buy.key == "hedge" else sinfo
-        hfill = bfill if buy.key == "hedge" else sfill
-        ofill = sfill if buy.key == "hedge" else bfill
-        planned_miss = (cfg.hedge_leg_slippage_bps is not None
+        # the leg that filled less is the one that missed
+        short_v, short_info, short_fill, long_fill = (
+            (buy, binfo, bfill, sfill) if bfill < sfill else (sell, sinfo, sfill, bfill))
+        own_slip = (cfg.hedge_leg_slippage_bps if short_v.key == "hedge"
+                    else cfg.primary_leg_slippage_bps)
+        planned_miss = (own_slip is not None
                         and imbalanced and not hard_err and not unresolved
-                        and not hinfo.get("err") and hfill < ofill)
+                        and not short_info.get("err") and short_fill < long_fill)
         if planned_miss:
-            log.info("[ARB] hedge leg %s missed its %.1f bps protection "
-                     "(%s) — repairing", self.hedge.name,
-                     cfg.hedge_leg_slippage_bps, hinfo.get("status"))
+            log.info("[ARB] %s leg missed its %.1f bps protection "
+                     "(%s) — repairing", short_v.name, own_slip,
+                     short_info.get("status"))
         elif not problem:
             self.consec_errors = 0
         elif not rate_limited:
