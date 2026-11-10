@@ -216,6 +216,11 @@ class Config:
     pause_tz: str = "America/New_York"
     # repair hedges widen hedge_slippage_bps x2 per failed attempt up to this
     hedge_slippage_max_bps: float = 40.0
+    # one-leg misses (a leg cancelled for price, repaired by the hedge) do
+    # not halt: after this many in a row, no new arbitrage for
+    # miss_cooldown_sec. 0 = count them as execution errors (old behaviour)
+    miss_cooldown_after: int = 3
+    miss_cooldown_sec: float = 600.0
 
     @property
     def creds_complete(self) -> bool:
@@ -289,6 +294,8 @@ _SCHEMA: Dict[str, Any] = {
         "pause_windows": "list[str]",
         "pause_tz": str,
         "hedge_slippage_max_bps": float,
+        "miss_cooldown_after": int,
+        "miss_cooldown_sec": float,
     },
     "recorder": {
         "enabled": bool,
@@ -659,4 +666,6 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         pause_windows=pause_windows,
         pause_tz=pause_tz,
         hedge_slippage_max_bps=hedge_slip_max,
+        miss_cooldown_after=int(_get(raw, "execution", "miss_cooldown_after", 3)),
+        miss_cooldown_sec=float(_get(raw, "execution", "miss_cooldown_sec", 600.0)),
     )

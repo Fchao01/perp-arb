@@ -156,6 +156,13 @@ execution:
   # 8 failures in a row. 补对冲每失败一次保护价翻倍，直到此上限；重试间隔逐步拉长到 1 分钟，
   # 连续失败 8 次告警。
   # hedge_slippage_max_bps: 40.0
+  # A one-leg miss (a leg cancelled for price, then repaired) does not halt
+  # the bot: after this many in a row it opens no new arbitrage for
+  # miss_cooldown_sec, then carries on. 0 = count misses as execution errors.
+  # 单腿未成交（因价格被取消、随后已补对冲）不再导致停机：连续这么多次后暂停开新单
+  # miss_cooldown_sec 秒，之后自动恢复。设 0 则按旧规则计入连续错误。
+  # miss_cooldown_after: 3
+  # miss_cooldown_sec: 600
 
 # ===================== MAKER MODE / 挂单模式 ===============================
 # Only used with  python3 main.py --mode maker ...  (the default taker mode

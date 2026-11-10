@@ -152,3 +152,21 @@ def test_max_slippage_must_cover_base():
     with pytest.raises(ConfigError):
         cfg_with(execution="  hedge_slippage_bps: 30\n  hedge_slippage_max_bps: 10")
     assert cfg_with(execution="  hedge_slippage_bps: 50").hedge_slippage_max_bps == 50
+
+
+# ------------------------------------------------------ miss cooldown
+
+def test_cooldown_blocks_new_arbitrage_then_expires(monkeypatch):
+    eng = make()
+    eng._cooldown_until = engine_mod.time.time() + 600
+    assert scan_at(eng, 1000.0, 1000.1) == [None, None]
+    eng._cooldown_until = 0.0
+    first, fired = scan_at(eng, 1000.2, 1000.3)
+    assert first is None and fired is not None
+
+
+def test_cooldown_config():
+    c = cfg_with()
+    assert c.miss_cooldown_after == 3 and c.miss_cooldown_sec == 600.0
+    c = cfg_with(execution="  miss_cooldown_after: 5\n  miss_cooldown_sec: 120")
+    assert c.miss_cooldown_after == 5 and c.miss_cooldown_sec == 120.0

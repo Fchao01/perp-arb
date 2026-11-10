@@ -134,6 +134,9 @@ class Engine:
         self._hedge_streak = 0
         self._hedge_next_ts = 0.0
         self._hedge_alerted = False
+        # one-leg misses in a row, and the cooldown they trigger
+        self._miss_streak = 0
+        self._cooldown_until = 0.0
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -505,7 +508,8 @@ class Engine:
                 log.info("pause window %s over — trading resumes / 暂停结束",
                          self._paused_in)
             self._paused_in = window
-        blocked = bool(window) or self._open_imbalance()
+        cooling = time.time() < self._cooldown_until
+        blocked = bool(window) or cooling or self._open_imbalance()
         if blocked:
             # a signal must start fresh afterwards, so its age (and size)
             # never includes the paused time
@@ -756,15 +760,22 @@ class Engine:
             (buy, binfo, bfill, sfill) if bfill < sfill else (sell, sinfo, sfill, bfill))
         own_slip = (cfg.hedge_leg_slippage_bps if short_v.key == "hedge"
                     else cfg.primary_leg_slippage_bps)
-        planned_miss = (own_slip is not None
-                        and imbalanced and not hard_err and not unresolved
-                        and not short_info.get("err") and short_fill < long_fill)
+        # a one-leg miss: the exchange cancelled the short leg for price
+        # (no error, nothing unresolved). The repair hedge fixes it and no
+        # new arbitrage fires until it has, so it is not an execution error.
+        slip_miss = (imbalanced and not hard_err and not unresolved
+                     and not short_info.get("err") and short_fill < long_fill)
+        planned_miss = slip_miss and (own_slip is not None
+                                      or cfg.miss_cooldown_after > 0)
         if planned_miss:
             log.info("[ARB] %s leg missed its %.1f bps protection "
-                     "(%s) — repairing", short_v.name, own_slip,
+                     "(%s) — repairing", short_v.name,
+                     own_slip if own_slip is not None else cfg.leg_slippage_bps,
                      short_info.get("status"))
+            self._note_miss()
         elif not problem:
             self.consec_errors = 0
+            self._miss_streak = 0
         elif not rate_limited:
             self.consec_errors += 1
             if self.consec_errors >= cfg.max_consecutive_errors:
@@ -875,6 +886,19 @@ class Engine:
         if remaining > 1e-12:
             known = False
         return (pnl if known and source_ids else None), list(dict.fromkeys(source_ids))
+
+    def _note_miss(self) -> None:
+        """Several one-leg misses in a row mean the books are moving faster
+        than the orders: stop opening trades for a while instead of halting
+        for good. Repair hedges keep running."""
+        self._miss_streak += 1
+        n, cfg = self._miss_streak, self.cfg
+        if cfg.miss_cooldown_after and n >= cfg.miss_cooldown_after:
+            self._miss_streak = 0
+            self._cooldown_until = time.time() + cfg.miss_cooldown_sec
+            log.warning("%d one-leg misses in a row — no new arbitrage for "
+                        "%.0f s / 连续 %d 次单腿未成交，暂停开新单 %.0f 秒",
+                        n, cfg.miss_cooldown_sec, n, cfg.miss_cooldown_sec)
 
     def _open_imbalance(self) -> bool:
         """True while the venues are out of balance by a hedgeable amount:
@@ -1244,6 +1268,8 @@ class Engine:
                      rec + (f" | src-skipped {self.skipped_by_source}"
                             if cfg.signal_source != "any" else "")
                      + (f" | PAUSED {self._paused_in}" if self._paused_in else "")
+                     + (f" | COOLDOWN {self._cooldown_until - time.time():.0f}s"
+                        if time.time() < self._cooldown_until else "")
                      + (" | NET OPEN, no new arbs" if self._imbalance_blocked else "")
                      + (f" | hedge fails {self._hedge_streak}"
                         if self._hedge_streak else ""),

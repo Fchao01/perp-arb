@@ -233,11 +233,12 @@ class OrderVenue(StubVenue):
                 "err": None, "unresolved": False}
 
 
-def run_execute(lead, rh_fills, lighter_fills, qty=1.0):
+def run_execute(lead, rh_fills, lighter_fills, qty=1.0, extra=""):
     """sell RH (primary) / buy LIGHTER (hedge) at a 10 bps planned edge."""
     cfg = make_cfg(execution=f"""  lead_venue: {lead}
   lead_slippage_bps: 0.0
-  leg_slippage_bps: 10.0""")
+  leg_slippage_bps: 10.0
+{extra}""")
     cfg.trades_csv = os.path.join(tempfile.mkdtemp(), "trades.csv")
     eng = Engine(cfg)
     rh = OrderVenue("entropy", "RH", rh_fills)
@@ -292,13 +293,28 @@ def test_sequential_unresolved_lead_skips_follower():
     assert eng.consec_errors == 1
 
 
+def test_one_leg_miss_starts_a_cooldown_not_a_halt():
+    eng, rh, lt, _ = run_execute("none", [1.0, 1.0], [0.0, 0.0])
+    assert eng.consec_errors == 0 and eng._miss_streak == 1
+    assert not eng.recent_trades[-1]["ok"]
+    eng._miss_streak = 2                      # third miss in a row
+    import entropy_arb.engine as em
+    before = em.time.time()
+    asyncio.run(eng._execute(lt, rh, ArbPlan(1.0, 100.0, 100.1, 100.0, 100.1,
+                                             1.0, 100.0, 10.0, 10.0, 0.0, 0.0)))
+    assert not eng.halted and eng._miss_streak == 0
+    assert eng._cooldown_until >= before + eng.cfg.miss_cooldown_sec - 1
+
+
 def test_one_leg_fill_counts_as_execution_problem():
-    eng, rh, lt, _ = run_execute("primary", [1.0], [0.0])
+    eng, rh, lt, _ = run_execute("primary", [1.0], [0.0],
+                                 extra="  miss_cooldown_after: 0")
     assert eng.consec_errors == 1
     assert not eng.recent_trades[-1]["ok"]
     assert eng.trades == 0 and eng.total_exp_edge == 0.0
     # concurrent mode: same rule, both legs sent at once
-    eng, rh, lt, _ = run_execute("none", [0.0], [1.0])
+    eng, rh, lt, _ = run_execute("none", [0.0], [1.0],
+                                 extra="  miss_cooldown_after: 0")
     assert len(rh.orders) == len(lt.orders) == 1
     assert rh.orders[0]["limit_ioc"] is False
     assert eng.consec_errors == 1
