@@ -408,3 +408,15 @@ tests/                   python3 -m pytest tests/
 ## 开源协议
 
 [MIT](LICENSE)
+
+
+## 外部交易所价格记录（tools/ext_recorder.py）
+
+只读，不下单、不需要密钥。记录币安合约（或 `--venue okx`）的最优买卖价，用于分析 BTC 等在外部交易所先动、
+Lighter 后跟的领先-滞后关系，判断 Lighter 上出现的价差是真是假：
+
+```bash
+nohup python3 tools/ext_recorder.py --symbols BTC,ETH,SOL,HYPE > logs/ext_recorder.out 2>&1 < /dev/null &
+```
+
+文件写在 `logs/ext/`，按交易所、币种、UTC 日期分开；中间价变动 0.1 bps 以上或间隔 1 秒才写一行。
