@@ -188,6 +188,7 @@ the selected primary; for Entropy it overrides legacy `entropy:` settings. Full 
 | `sizing.take_fraction` | fraction of crossable depth taken | 0.5 |
 | `sizing.max_order_notional_usd` | per-slice cap | 500 |
 | `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
+| `inventory.target_primary_usd` / `target_band_usd` | position to hold on the primary (+ long, − short; the hedge venue holds the mirror) and how far it may swing around it; the bot turns over around this position instead of around flat | 0 / 0 |
 | `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
 | `execution.lead_venue` / `lead_slippage_bps` | sequential execution: which leg goes first as a tight IOC limit | `none` / 0 |
 | `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |

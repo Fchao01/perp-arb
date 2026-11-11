@@ -162,6 +162,11 @@ class Config:
     # inventory ladder
     inventory_scale_bps: float
     inventory_floor_frac: float
+    # position to hold on the primary, USD (+ long, - short; hedge venue
+    # holds the mirror); 0 = turn over around flat
+    inventory_target_usd: float
+    # how far the position may swing around the target, USD; 0 = up to the cap
+    inventory_target_band_usd: float
     # execution
     premium_persist_sec: float
     cooldown_sec: float
@@ -276,6 +281,8 @@ _SCHEMA: Dict[str, Any] = {
     "inventory": {
         "scale_bps": float,
         "floor_frac": float,
+        "target_primary_usd": float,
+        "target_band_usd": float,
     },
     "execution": {
         "premium_persist_sec": float,
@@ -633,6 +640,17 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
     if hedge_slip_max < hedge_slip:
         raise ConfigError("execution.hedge_slippage_max_bps must be >= "
                           "hedge_slippage_bps / 不能小于 hedge_slippage_bps")
+    inv_target = float(_get(raw, "inventory", "target_primary_usd", 0.0))
+    inv_band = float(_get(raw, "inventory", "target_band_usd", 0.0))
+    if inv_band < 0:
+        raise ConfigError("inventory.target_band_usd must be >= 0 / 不能为负数")
+    for vc in (entropy, hedge):
+        # a cap of 0 is the close-only setting: the target is ignored there
+        if vc.cap_usd > 0 and abs(inv_target) > vc.cap_usd:
+            raise ConfigError(
+                f"inventory.target_primary_usd ({inv_target:g}) is beyond "
+                f"{vc.label}'s max_position_usd ({vc.cap_usd:g}) / "
+                f"目标仓位超过了 {vc.label} 的仓位上限")
     return Config(
         symbol=symbol,
         hedge_venue=hedge_venue,
@@ -651,6 +669,8 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         min_order_notional=float(_get(raw, "sizing", "min_order_notional_usd", 10.0)),
         inventory_scale_bps=float(_get(raw, "inventory", "scale_bps", 10.0)),
         inventory_floor_frac=float(_get(raw, "inventory", "floor_frac", 0.5)),
+        inventory_target_usd=inv_target,
+        inventory_target_band_usd=inv_band,
         premium_persist_sec=float(_get(raw, "execution", "premium_persist_sec", 0.3)),
         cooldown_sec=float(_get(raw, "execution", "cooldown_sec", 0.0)),
         settle_timeout_sec=float(_get(raw, "execution", "settle_timeout_sec", 5.0)),

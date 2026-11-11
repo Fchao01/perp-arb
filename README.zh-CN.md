@@ -175,6 +175,7 @@ python3 main.py --symbol SNDK --primary entropy --hedge lighter-rh
 | `sizing.take_fraction` | 吃掉可套利深度的比例 | 0.5 |
 | `sizing.max_order_notional_usd` | 单笔名义上限 | 500 |
 | `inventory.scale_bps` / `floor_frac` | 库存阶梯（仓位超过上限的 `floor_frac` 后额外加价） | 10 / 0.5 |
+| `inventory.target_primary_usd` / `target_band_usd` | 主腿长期持有的目标仓位（+ 多、− 空，对冲腿等额反向）及允许的摆幅；机器人围绕这个仓位周转，而不是围绕空仓 | 0 / 0 |
 | `execution.premium_persist_sec` | 信号需持续多久才触发 | 0.3 |
 | `execution.lead_venue` / `lead_slippage_bps` | 顺序执行：哪条腿先用紧限价 IOC 下单 | `none` / 0 |
 | `execution.*` | 滑点保护、超时、对账周期等 | 见配置文件 |

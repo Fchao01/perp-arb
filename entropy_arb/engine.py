@@ -347,28 +347,50 @@ class Engine:
 
     # --------------------------------------------------------------- signals
 
+    def _pos_range(self, v):
+        """(target, lo, hi) of a venue's position in USD.
+
+        Without a target this is (0, -cap, +cap). inventory.target_primary_usd
+        moves the center: the primary holds +target, the hedge venue the
+        mirror -target (clamped to the venue's cap), and target_band_usd
+        limits how far the position may swing around it."""
+        cap = v.cap_usd
+        t = self.cfg.inventory_target_usd
+        if v.key != "entropy":
+            t = -t
+        t = min(max(t, -cap), cap)
+        band = self.cfg.inventory_target_band_usd
+        if band > 0:
+            return t, max(-cap, t - band), min(cap, t + band)
+        return t, -cap, cap
+
     def _inv_add_bps(self, buy, sell) -> float:
         """Inventory ladder: a surcharge that grows once a venue's position
-        passes floor_frac of its cap in the direction the trade would add to
-        (buying adds when that venue is >= flat long; selling adds when the
-        venue is <= flat short). Max of the two venues' ramps."""
+        is more than floor_frac of the way from its target to the limit, in
+        the direction the trade would add to (buying adds when the venue is
+        at or above its target; selling adds when at or below). Max of the
+        two venues' ramps. With no target the target is flat (0) and the
+        limit is the cap."""
         scale = self.cfg.inventory_scale_bps
         if scale <= 0:
             return 0.0
         floor = min(max(self.cfg.inventory_floor_frac, 0.0), 0.99)
 
-        def ramp(v, adding: bool) -> float:
-            if not adding:
-                return 0.0
+        def ramp(v, buying: bool) -> float:
             ref = v.book.mid()
             if ref is None:
                 return 0.0
-            u = min(abs(v.position) * ref / v.cap_usd, 1.0)
+            t, lo, hi = self._pos_range(v)
+            dev = v.position * ref - t
+            if (dev < 0) if buying else (dev > 0):
+                return 0.0          # the trade moves toward the target
+            room = (hi - t) if buying else (t - lo)
+            u = min(abs(dev) / room, 1.0) if room > 0 else 1.0
             if u <= floor:
                 return 0.0
             return scale * (u - floor) / (1.0 - floor)
 
-        return max(ramp(buy, buy.position >= 0), ramp(sell, sell.position <= 0))
+        return max(ramp(buy, True), ramp(sell, False))
 
     def _eff_threshold(self, buy, sell) -> float:
         """Net hurdle (bps, on top of fees) for the direction buy->sell.
@@ -397,8 +419,10 @@ class Engine:
         return buy if buy.key == key else sell
 
     def _headroom(self, buy, sell, ref_px: float) -> float:
-        hb = buy.cap_usd - buy.position * ref_px
-        hs = sell.cap_usd + sell.position * ref_px
+        _, _, hi = self._pos_range(buy)
+        _, lo, _ = self._pos_range(sell)
+        hb = hi - buy.position * ref_px
+        hs = sell.position * ref_px - lo
         return min(hb, hs)
 
     def _plan(self, buy, sell, cap_notional: float):
@@ -1293,6 +1317,11 @@ class Engine:
                      self.total_exp_edge, self.total_fill_edge,
                      rec + (f" | src-skipped {self.skipped_by_source}"
                             if cfg.signal_source != "any" else "")
+                     + (f" | target {self.entropy.name} "
+                        f"${cfg.inventory_target_usd:+,.0f}"
+                        + (f" ±{cfg.inventory_target_band_usd:,.0f}"
+                           if cfg.inventory_target_band_usd > 0 else "")
+                        if cfg.inventory_target_usd else "")
                      + (f" | PAUSED {self._paused_in}" if self._paused_in else "")
                      + (f" | COOLDOWN {self._cooldown_until - time.time():.0f}s"
                         if time.time() < self._cooldown_until else "")

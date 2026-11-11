@@ -103,6 +103,24 @@ sizing:
 inventory:
   scale_bps: 10.0
   floor_frac: 0
+  # Position to HOLD on the primary venue, in USD: +8000 = stay about $8,000
+  # long on the primary (the hedge venue holds the mirror short), -8000 =
+  # short. 0 = turn over around flat. The bot keeps trading both ways, but
+  # around this position instead of around zero: trades away from it are
+  # blocked at the limit and pay the ladder surcharge on the way there,
+  # trades back toward it never do. A position on the wrong side walks over
+  # by itself, one normal signal at a time.
+  # 主腿要长期持有的仓位（美元）：+8000 = 主腿保持约 $8,000 多头（对冲腿等额
+  # 空头），-8000 = 空头，0 = 围绕空仓周转。机器人照常双向交易，只是围绕这个
+  # 仓位而不是围绕 0：远离目标的方向到边界就停、途中按库存阶梯加价，回到目标
+  # 的方向不加价。仓位在反方向时，会随正常信号一笔一笔自己走过来。
+  # target_primary_usd: 0
+  # How far the position may swing around the target, USD. With target 8000
+  # and band 3000 it stays between $5,000 and $11,000 (never past
+  # max_position_usd). 0 = anywhere inside +/- max_position_usd.
+  # 仓位围绕目标可以摆动多少美元。目标 8000、摆幅 3000 时仓位保持在 $5,000 到
+  # $11,000 之间（不会超过 max_position_usd）。0 = 只受 max_position_usd 限制。
+  # target_band_usd: 0
 
 # ======================= EXECUTION / 执行参数 ==============================
 execution:
