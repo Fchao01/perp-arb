@@ -162,6 +162,11 @@ async def sample(session, signer, account_index: int, boost_side: str) -> dict:
 
 
 async def run(args) -> None:
+    if not os.path.isfile(args.env_file):
+        raise SystemExit(f"{args.env_file} not found in {os.getcwd()} — use "
+                         f"an env file of a bot running on this server / "
+                         f"本目录下没有 {args.env_file}，请用这台服务器上某个"
+                         f"在跑的市场的 env 文件")
     load_dotenv(args.env_file)
     try:
         account_index = int(os.environ["LIGHTER_RH_ACCOUNT_INDEX"])
