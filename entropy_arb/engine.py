@@ -34,6 +34,7 @@ from .book import ArbPlan, floor_step, plan_arb
 from .center import CenterTracker
 from .config import Config
 from .recorder import MinuteRecorder
+from .ext_feed import ExtFeed
 from .schedule import Blackout
 from .telegram import TelegramNotifier, trade_message
 from .venue_hl import HLVenue
@@ -59,7 +60,7 @@ CSV_HEADER = ["ts", "direction", "buy_venue", "sell_venue", "qty",
               "sell_confirm_latency_ms", "buy_total_latency_ms",
               "sell_total_latency_ms", "pair_total_latency_ms", "residual_qty",
               "buy_feed_lag_ms", "sell_feed_lag_ms", "signal_age_ms",
-              "signal_source"]
+              "signal_source", "ext_move_bps"]
 HEDGE_HEADER = ["ts", "trade_id", "venue", "side", "requested_qty",
                 "filled_qty", "status", "limit_px", "avg_px", "fee_bps",
                 "fee_usd", "client_order_id", "exchange_order_id",
@@ -137,6 +138,13 @@ class Engine:
         # one-leg misses in a row, and the cooldown they trigger
         self._miss_streak = 0
         self._cooldown_until = 0.0
+        # external reference price filter (ext_filter:)
+        self.ext = (ExtFeed(cfg.ext_venue, cfg.ext_symbol or cfg.symbol,
+                            cfg.ext_stale_ms / 1000.0)
+                    if cfg.ext_venue else None)
+        self._ext_skipped: Dict[str, Optional[float]] = {}
+        self.skipped_by_ext = 0
+        self._fire_ext: Optional[float] = None
         self._step = 1e-4
         self._min_base = 0.0
         self._min_notional = 10.0
@@ -314,6 +322,9 @@ class Engine:
         if cfg.midline_auto:
             tasks.append(asyncio.create_task(self._center_loop(),
                                              name="center"))
+        if self.ext is not None and not self.record_only:
+            tasks.append(asyncio.create_task(self.ext.run(self.stop),
+                                             name="ext-feed"))
         tasks.append(asyncio.create_task(self._status_loop(), name="status"))
         if live:
             tasks.append(asyncio.create_task(self._reconcile_loop(),
@@ -568,6 +579,19 @@ class Engine:
                                   "(signal_source: %s)", dkey, src,
                                   cfg.signal_source)
                 continue
+            ext_move = None
+            if self.ext is not None:
+                ext_move = self.ext.move_bps(cfg.ext_window_ms / 1000.0, now)
+                if ext_move is not None and ext_move > cfg.ext_max_move_bps:
+                    if self._ext_skipped.get(dkey) != armed:  # count once
+                        self._ext_skipped[dkey] = armed
+                        self.skipped_by_ext += 1
+                        self._skiplog("%s skipped: %s %s moved %.2f bps in "
+                                      "%.0f ms", dkey, cfg.ext_venue,
+                                      self.ext.symbol, ext_move,
+                                      cfg.ext_window_ms)
+                    self._schedule_poke(0.05)
+                    continue
             cap = cfg.max_order_notional
             if tiers:
                 cap = tier_cap(tiers, age)
@@ -588,6 +612,7 @@ class Engine:
                 best = (buy, sell, plan)
                 self._fire_age = age
                 self._fire_src = src
+                self._fire_ext = ext_move
         return best
 
     # ------------------------------------------------------------- execution
@@ -638,6 +663,7 @@ class Engine:
         book_snapshot["signal_age_ms"] = (signal_age * 1000.0
                                           if signal_age is not None else None)
         book_snapshot["signal_source"] = signal_src or ""
+        book_snapshot["ext_move_bps"] = self._fire_ext
         bslip = self._leg_slip_bps(buy) / 1e4
         sslip = self._leg_slip_bps(sell) / 1e4
         buy_bound = buy.px_round(plan.buy_limit * (1 + bslip), round_up=False)
@@ -1272,7 +1298,10 @@ class Engine:
                         if time.time() < self._cooldown_until else "")
                      + (" | NET OPEN, no new arbs" if self._imbalance_blocked else "")
                      + (f" | hedge fails {self._hedge_streak}"
-                        if self._hedge_streak else ""),
+                        if self._hedge_streak else "")
+                     + (f" | ext-skipped {self.skipped_by_ext}"
+                        + ("" if self.ext.move_bps(1.0) is not None else " (ext feed down)")
+                        if self.ext is not None else ""),
                      self.feed_lag_text(),
                      " *** HALTED ***" if self.halted else "")
 
@@ -1372,7 +1401,8 @@ class Engine:
                             self._csv_value(book_snapshot.get("buy_feed_lag_ms"), 3),
                             self._csv_value(book_snapshot.get("sell_feed_lag_ms"), 3),
                             self._csv_value(book_snapshot.get("signal_age_ms"), 1),
-                            book_snapshot.get("signal_source", "")])
+                            book_snapshot.get("signal_source", ""),
+                            self._csv_value(book_snapshot.get("ext_move_bps"), 3)])
         except Exception:
             log.exception("csv write failed")
 

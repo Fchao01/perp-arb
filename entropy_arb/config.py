@@ -221,6 +221,12 @@ class Config:
     # miss_cooldown_sec. 0 = count them as execution errors (old behaviour)
     miss_cooldown_after: int = 3
     miss_cooldown_sec: float = 600.0
+    # skip signals that follow a move on an external exchange (ext_filter:)
+    ext_venue: Optional[str] = None
+    ext_symbol: Optional[str] = None
+    ext_window_ms: float = 200.0
+    ext_max_move_bps: float = 0.5
+    ext_stale_ms: float = 2000.0
 
     @property
     def creds_complete(self) -> bool:
@@ -300,6 +306,13 @@ _SCHEMA: Dict[str, Any] = {
     "recorder": {
         "enabled": bool,
         "csv": str,
+    },
+    "ext_filter": {
+        "venue": str,
+        "symbol": str,
+        "window_ms": float,
+        "max_move_bps": float,
+        "stale_ms": float,
     },
     "maker": {
         "half_spread_bps": float,
@@ -605,6 +618,15 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         except Exception:
             raise ConfigError(f"execution.pause_tz {pause_tz!r} is not a known "
                               f"time zone / 未知时区")
+    ext_venue = None
+    if isinstance(raw.get("ext_filter"), dict):
+        ext_venue = str(_get(raw, "ext_filter", "venue", "binance")).lower()
+        if ext_venue not in ("binance", "okx"):
+            raise ConfigError("ext_filter.venue must be binance or okx")
+        for k in ("window_ms", "max_move_bps", "stale_ms"):
+            v = _get(raw, "ext_filter", k, None)
+            if v is not None and not float(v) > 0:
+                raise ConfigError(f"ext_filter.{k} must be > 0")
     hedge_slip = float(_get(raw, "execution", "hedge_slippage_bps", 20.0))
     hedge_slip_max = float(_get(raw, "execution", "hedge_slippage_max_bps",
                                 max(40.0, hedge_slip)))
@@ -667,5 +689,10 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         pause_tz=pause_tz,
         hedge_slippage_max_bps=hedge_slip_max,
         miss_cooldown_after=int(_get(raw, "execution", "miss_cooldown_after", 3)),
+        ext_venue=ext_venue,
+        ext_symbol=str(_get(raw, "ext_filter", "symbol", symbol)).upper(),
+        ext_window_ms=float(_get(raw, "ext_filter", "window_ms", 200.0)),
+        ext_max_move_bps=float(_get(raw, "ext_filter", "max_move_bps", 0.5)),
+        ext_stale_ms=float(_get(raw, "ext_filter", "stale_ms", 2000.0)),
         miss_cooldown_sec=float(_get(raw, "execution", "miss_cooldown_sec", 600.0)),
     )

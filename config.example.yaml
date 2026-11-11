@@ -212,6 +212,20 @@ maker:
                               # 交易所定时撤单：机器人停止刷新后自动撤掉 RH 账户所有市场的挂单
   fills_csv: logs/{symbol}/maker_fills.csv
 
+# ============ EXTERNAL PRICE FILTER / 外部价格过滤（可选）===================
+# Skip a signal when the external exchange's mid moved more than
+# max_move_bps over the last window_ms: such a premium is usually one Lighter
+# venue lagging a move that already happened, and its stale leg fills worse.
+# Leave the section out to disable. If the feed is down, signals are not
+# blocked. Crypto only (needs a USDT perp on the venue).
+# 外部交易所中间价在 window_ms 内变动超过 max_move_bps 时跳过信号：这类价差多半是 Lighter
+# 某一边还没跟上外部的变动。不写这一段即关闭；外部行情断开时不拦信号。仅适用于加密货币。
+# ext_filter:
+#   venue: binance        # binance | okx
+#   window_ms: 200
+#   max_move_bps: 0.5
+#   stale_ms: 2000
+
 # ================== DATA RECORDER / 数据采集 ===============================
 # Always-on while the bot runs: samples both real order books 1/sec and
 # writes one CSV row per minute. This is the input for tools/analyze.py.
