@@ -213,8 +213,14 @@ async def run(args) -> None:
             except Exception as e:
                 log.warning("sample failed, will retry next interval: %s", e)
             if args.once:
-                return
+                break
             await asyncio.sleep(args.interval_min * 60.0)
+    close = getattr(signer, "close", None)
+    if close is not None:
+        try:
+            await close()          # the SDK's own HTTP session
+        except Exception:
+            pass
 
 
 def main() -> None:
