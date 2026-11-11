@@ -3,15 +3,14 @@
 at once (the position the bot holds on the primary venue; see
 config.example.yaml).
 
-By default each file gets
-    target = its position cap (the smaller max_position_usd of the two legs)
-    band   = --band-mult (3) x its largest order size, at most 90% of the
-             target, so the position always stays on the chosen side
-and the sign follows --side: long = hold the primary (RH) long, short =
-hold it short. Files with a position cap of 0 (close-only markets) are
-left alone. Only the two target lines change; comments and every other
-setting stay as they are, and each changed file is first copied to
-<name>.bak.
+By default the position may be anywhere between --floor (0) and the file's
+position cap (the smaller max_position_usd of the two legs) on the side
+given by --side: long = the primary (RH) stays long, short = it stays
+short. The bot turns over exactly as before, it just never crosses to the
+other side. (In the file this is target = the middle of that range, band =
+half of it.) Files with a position cap of 0 (close-only markets) are left
+alone. Only the two target lines change; comments and every other setting
+stay as they are, and each changed file is first copied to <name>.bak.
 
     # show what would change, write nothing
     python3 tools/set_target.py --side long *.yaml
@@ -26,11 +25,11 @@ setting stay as they are, and each changed file is first copied to
 A running bot reads its config only at start: restart each market whose
 file changed.
 
-中文：一次修改多个配置文件里的目标仓位（inventory.target_primary_usd /
-target_band_usd）。默认：目标 = 该文件的仓位上限（两条腿里较小的那个），
-摆幅 = 3 倍最大单笔金额（不超过目标的 90%，保证仓位始终在所选方向）；
---side long 表示主腿（RH）做多，short 表示做空。仓位上限为 0 的"只平不开"
-市场不动。只改这两行，其他设置和注释不变，改之前先备份成 <文件名>.bak。
+中文：一次修改多个配置文件里的目标仓位。默认让仓位保持在 --floor（默认 0）
+到该文件仓位上限之间，方向由 --side 决定：long = 主腿（RH）始终做多，short =
+始终做空。机器人照常来回周转，只是不会跑到反方向。（写进文件的是：目标 =
+这个范围的中点，摆幅 = 范围的一半。）仓位上限为 0 的"只平不开"市场不动。
+只改这两行，其他设置和注释不变，改之前先备份成 <文件名>.bak。
 不加 --apply 只显示将要修改的内容。改完需要重启对应市场才生效。
 """
 from __future__ import annotations
@@ -67,13 +66,11 @@ def caps_and_order_size(raw: dict) -> Tuple[float, float]:
     return cap, order
 
 
-def default_target(cap: float, order: float, band_mult: float,
-                   side: str) -> Tuple[float, float]:
-    """Target at the cap, band a few orders wide but never past 90% of the
-    target (the position must stay on the chosen side)."""
-    band = min(band_mult * order, 0.9 * cap)
-    band = float(int(band // 50) * 50) if band >= 50 else band
-    return (cap if side == "long" else -cap), band
+def default_target(cap: float, floor: float, side: str) -> Tuple[float, float]:
+    """(target, band) that keeps the position between floor and cap on the
+    given side: the middle of that range and half its width."""
+    mid, half = (cap + floor) / 2.0, (cap - floor) / 2.0
+    return (mid if side == "long" else -mid), half
 
 
 def set_keys(text: str, target: Optional[float], band: Optional[float]) -> str:
@@ -136,24 +133,29 @@ def plan_file(path: str, args) -> dict:
     if args.target is not None:
         target = abs(args.target) if args.side == "long" else -abs(args.target)
         band = args.band if args.band is not None else min(
-            args.band_mult * order, 0.9 * abs(target))
+            abs(target), cap - abs(target))
     else:
-        target, band = default_target(cap, order, args.band_mult, args.side)
+        if args.floor >= cap:
+            return dict(out, action="skip",
+                        why=f"floor {_num(args.floor)} is not below the "
+                            f"position cap {_num(cap)} / 下限不低于仓位上限")
+        target, band = default_target(cap, args.floor, args.side)
         if args.band is not None:
             band = args.band
     if abs(target) > cap:
         return dict(out, action="skip",
                     why=f"target {_num(abs(target))} is above the position cap "
                         f"{_num(cap)} / 目标超过仓位上限")
-    if band >= abs(target):
+    if band > abs(target):
         return dict(out, action="skip",
-                    why=f"band {_num(band)} is not smaller than the target "
+                    why=f"band {_num(band)} is larger than the target "
                         f"{_num(abs(target))}: the position could cross to "
-                        f"the other side / 摆幅不小于目标，仓位可能跑到反方向")
+                        f"the other side / 摆幅大于目标，仓位可能跑到反方向")
     if band < order:
-        out["note"] = (f"band {_num(band)} is smaller than one order "
-                       f"({_num(order)}): expect little volume / "
-                       f"摆幅小于单笔金额，成交量会很少")
+        out["note"] = (f"the position can only move {_num(2 * band)} in "
+                       f"total, orders are up to {_num(order)}: expect "
+                       f"little volume / 可摆动的空间比单笔金额大不了多少，"
+                       f"成交量会很少")
     return dict(out, action="set", target=target, band=band)
 
 
@@ -186,14 +188,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("files", nargs="+", help="config files, e.g. *.yaml")
     ap.add_argument("--side", choices=("long", "short"), default="long",
                     help="side to hold on the primary (RH) / 主腿持仓方向")
+    ap.add_argument("--floor", type=float, default=0.0,
+                    help="smallest position to keep, USD (default 0) / "
+                         "最少保留的仓位，默认 0")
     ap.add_argument("--target", type=float, default=None,
-                    help="target in USD for every file (default: its "
-                         "position cap) / 目标仓位，默认取仓位上限")
+                    help="explicit target in USD for every file / 手动指定目标")
     ap.add_argument("--band", type=float, default=None,
-                    help="band in USD for every file (default: band-mult x "
-                         "largest order) / 摆幅，默认按单笔金额的倍数")
-    ap.add_argument("--band-mult", type=float, default=3.0,
-                    help="default band = this many orders / 默认摆幅为几笔单")
+                    help="explicit band in USD for every file / 手动指定摆幅")
     ap.add_argument("--off", action="store_true",
                     help="remove the target (turn over around flat) / 去掉目标")
     ap.add_argument("--apply", action="store_true",
@@ -203,6 +204,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error("--target must be > 0; use --side short for a short target")
     if args.band is not None and args.band < 0:
         ap.error("--band must be >= 0")
+    if args.floor < 0:
+        ap.error("--floor must be >= 0")
 
     changed = failed = 0
     for path in args.files:

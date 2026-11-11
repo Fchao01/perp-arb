@@ -50,10 +50,11 @@ def load(path):
 
 def test_defaults_come_from_the_cap_and_the_largest_order():
     assert set_target.caps_and_order_size(yaml.safe_load(BTC)) == (10000.0, 1500.0)
-    assert set_target.default_target(10000, 1500, 3, "long") == (10000.0, 4500.0)
-    assert set_target.default_target(10000, 1500, 3, "short") == (-10000.0, 4500.0)
-    # a band of 3 orders would cross zero on a small cap: held to 90%
-    assert set_target.default_target(3000, 1500, 3, "long") == (3000.0, 2700.0)
+    # anywhere between 0 and the cap, on the chosen side
+    assert set_target.default_target(10000, 0, "long") == (5000.0, 5000.0)
+    assert set_target.default_target(10000, 0, "short") == (-5000.0, 5000.0)
+    # with a floor of 2000: 2000 .. 10000
+    assert set_target.default_target(10000, 2000, "long") == (6000.0, 4000.0)
 
 
 def test_apply_changes_only_the_two_keys_and_keeps_comments():
@@ -63,8 +64,8 @@ def test_apply_changes_only_the_two_keys_and_keeps_comments():
         text = fh.read()
     cfg = yaml.safe_load(text)
     assert cfg["inventory"] == {"scale_bps": 0, "floor_frac": 0,
-                                "target_primary_usd": 10000,
-                                "target_band_usd": 4500}
+                                "target_primary_usd": 5000,
+                                "target_band_usd": 5000}
     assert "# ladder off" in text and "# a comment that stays" in text
     assert "# hedge leg" in text
     want = yaml.safe_load(BTC)
@@ -76,7 +77,10 @@ def test_apply_changes_only_the_two_keys_and_keeps_comments():
     with open(path) as fh:
         text = fh.read()
     assert text.count("target_primary_usd") == 1
-    assert load(path)["inventory"]["target_primary_usd"] == -10000
+    assert load(path)["inventory"]["target_primary_usd"] == -5000
+    set_target.main(["--floor", "2000", "--apply", path])
+    assert load(path)["inventory"]["target_primary_usd"] == 6000
+    assert load(path)["inventory"]["target_band_usd"] == 4000
 
 
 def test_preview_writes_nothing():
@@ -102,8 +106,8 @@ def test_file_without_an_inventory_section():
     set_target.main(["--apply", path])
     cfg = load(path)
     assert cfg["thresholds"] == {"upper_bps": 1, "lower_bps": 1}
-    assert cfg["inventory"] == {"target_primary_usd": 1000,
-                                "target_band_usd": 900}   # default cap, 90%
+    assert cfg["inventory"] == {"target_primary_usd": 500,
+                                "target_band_usd": 500}   # default cap 1000
 
 
 def test_skips_close_only_markets_and_unsafe_values(capsys):
@@ -113,7 +117,7 @@ def test_skips_close_only_markets_and_unsafe_values(capsys):
     assert load(path) == yaml.safe_load(closing)
     path = write(BTC)
     set_target.main(["--target", "20000", "--apply", path])    # above the cap
-    set_target.main(["--target", "8000", "--band", "8000", "--apply", path])
+    set_target.main(["--target", "8000", "--band", "9000", "--apply", path])
     assert load(path) == yaml.safe_load(BTC)
     out = capsys.readouterr().out
     assert out.count("skipped") == 3
@@ -126,5 +130,5 @@ def test_result_loads_in_the_bot():
     cfg = load_config(path, os.path.join(tempfile.gettempdir(), "none.env"),
                       symbol="BTC", hedge_venue="lighter",
                       primary_venue="light-rh")
-    assert cfg.inventory_target_usd == 10000.0
-    assert cfg.inventory_target_band_usd == 4500.0
+    assert cfg.inventory_target_usd == 5000.0
+    assert cfg.inventory_target_band_usd == 5000.0
