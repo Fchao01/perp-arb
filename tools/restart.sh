@@ -58,11 +58,25 @@ for d in /proc/[0-9]*; do
     [ "$hit" = 1 ] || continue
   fi
   pids_of[$sym]="${pids_of[$sym]:-} $pid"
-  # same interpreter as before (the virtualenv's python), even if this
-  # shell has a different python3 first on PATH
-  exe=$(readlink "$d/exe" 2>/dev/null || true)
+  # same interpreter as before. A virtualenv's python is a symlink to the
+  # system python and only acts as the venv when started through that link,
+  # so never resolve the link: if argv[0] is a bare name (python3), look it
+  # up in the PATH the bot itself was started with (the activated venv).
   case "${argv[0]}" in
-    python*|*/python*) [ -n "$exe" ] && [ -x "$exe" ] && argv[0]=$exe ;;
+    /*) ;;
+    */*) argv[0]="$(readlink "$d/cwd")/${argv[0]}" ;;
+    *)
+      ppath=$(tr '\0' '\n' < "$d/environ" 2>/dev/null | sed -n 's/^PATH=//p' | head -1)
+      found=""
+      if [ -n "$ppath" ]; then
+        IFS=: read -r -a pdirs <<< "$ppath"
+        for pd in "${pdirs[@]}"; do
+          case "$pd" in /*) ;; *) pd="$(readlink "$d/cwd")/$pd" ;; esac
+          if [ -x "$pd/${argv[0]}" ]; then found="$pd/${argv[0]}"; break; fi
+        done
+      fi
+      [ -n "$found" ] && argv[0]=$found
+      ;;
   esac
   printf -v q '%q ' "${argv[@]}"
   cmd_of[$sym]=$q
@@ -105,13 +119,14 @@ for s in $syms; do
   fi
   eval "nohup ${cmd_of[$s]} >> $(printf '%q' "$out") 2>&1 < /dev/null &"
   new=$!
-  sleep 1
+  sleep 3
   if kill -0 "$new" 2>/dev/null; then
     echo "$s: restarted, pid $new, output -> $out / 已重启"
     ok=$((ok+1))
   else
     echo "$s: FAILED to start, see $out / 启动失败，请看 $out"
     echo "    command: ${cmd_of[$s]}"
+    tail -n 5 "$out" 2>/dev/null | sed 's/^/    | /'
     bad=$((bad+1))
   fi
 done
