@@ -32,6 +32,7 @@ import aiohttp
 
 from .book import ArbPlan, floor_step, plan_arb
 from .center import CenterTracker
+from .daily import DailyLoss
 from .config import Config
 from .recorder import MinuteRecorder
 from .ext_feed import ExtFeed
@@ -149,6 +150,11 @@ class Engine:
         self._min_base = 0.0
         self._min_notional = 10.0
         self._mtm_baseline: Optional[float] = None
+        # daily loss limit (execution.daily_loss_limit_usd)
+        self.daily = (DailyLoss(cfg.daily_loss_limit_usd, cfg.daily_reset_tz,
+                                cfg.daily_state_json)
+                      if cfg.daily_loss_limit_usd > 0 else None)
+        self._daily_alerted: Optional[str] = None
         self._trade_seq = 0
         self._last_trade_id: Optional[str] = None
         self._lots: Dict[str, deque] = {}
@@ -339,6 +345,9 @@ class Engine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.daily is not None:
+            self._daily_stopped()
+            self.daily.save()
         for v in self.venues.values():
             await v.close()
         log.info("shutdown — %d trades, %d hedges, exp edge $%.4f, "
@@ -544,7 +553,9 @@ class Engine:
                          self._paused_in)
             self._paused_in = window
         cooling = time.time() < self._cooldown_until
-        blocked = bool(window) or cooling or self._open_imbalance()
+        day_stop = self._daily_stopped()
+        blocked = (bool(window) or cooling or day_stop
+                   or self._open_imbalance())
         if blocked:
             # a signal must start fresh afterwards, so its age (and size)
             # never includes the paused time
@@ -1224,16 +1235,56 @@ class Engine:
             total += v.equity - v.start_equity
         return total
 
-    def session_pnl(self) -> Optional[float]:
+    def _book_value(self) -> Optional[float]:
+        """Cash + positions at mid over both venues (None without a mid)."""
         total = 0.0
         for v in self.venues.values():
             m = v.book.mid()
             if m is None:
                 return None
             total += v.cash + v.position * m
+        return total
+
+    def _daily_stopped(self) -> bool:
+        """True once today's PnL hit -daily_loss_limit_usd (until midnight)."""
+        d = self.daily
+        if d is None:
+            return False
+        value = self._book_value()
+        if value is not None:
+            d.update(time.time(), value)
+        if d.tripped and self._daily_alerted != d.day:
+            self._daily_alerted = d.day
+            msg = (f"[{self.cfg.symbol}] daily loss limit reached: today "
+                   f"{d.pnl:+.2f} USD (limit -{d.limit:g}) — no new arbitrage "
+                   f"until midnight {self.cfg.daily_reset_tz}; repair hedges "
+                   f"continue / 当天亏损 {d.pnl:+.2f} 已到上限 {d.limit:g}，"
+                   f"停止开新单至明天 0 点")
+            log.warning(msg)
+            d.save()
+            if self.cfg.telegram.enabled:
+                self.telegram.enqueue(msg)
+        return d.tripped
+
+    def session_pnl(self) -> Optional[float]:
+        total = self._book_value()
+        if total is None:
+            return None
         if self._mtm_baseline is None:
             self._mtm_baseline = total
         return total - self._mtm_baseline
+
+    def _daily_status(self) -> str:
+        """' | day $-1.23/-3' for the status line (saves the day's PnL)."""
+        d = self.daily
+        if d is None:
+            return ""
+        self._daily_stopped()
+        if d.pnl is None:
+            return ""
+        d.save()
+        return (f" | day ${d.pnl:+.2f}/-{d.limit:g}"
+                + (" STOPPED" if d.tripped else ""))
 
     def premium_bps(self) -> Optional[float]:
         em, hm = self.entropy.book.mid(), self.hedge.book.mid()
@@ -1326,6 +1377,7 @@ class Engine:
                      + (f" | COOLDOWN {self._cooldown_until - time.time():.0f}s"
                         if time.time() < self._cooldown_until else "")
                      + (" | NET OPEN, no new arbs" if self._imbalance_blocked else "")
+                     + self._daily_status()
                      + (f" | hedge fails {self._hedge_streak}"
                         if self._hedge_streak else "")
                      + (f" | ext-skipped {self.skipped_by_ext}"

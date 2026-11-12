@@ -226,6 +226,13 @@ class Config:
     # miss_cooldown_sec. 0 = count them as execution errors (old behaviour)
     miss_cooldown_after: int = 3
     miss_cooldown_sec: float = 600.0
+    # stop opening new arbitrage for the rest of the day once this market's
+    # PnL for the day (fills + positions at mid) is down this much; 0 = off
+    daily_loss_limit_usd: float = 0.0
+    # the day starts at midnight in this time zone
+    daily_reset_tz: str = "Asia/Shanghai"
+    # where the day's PnL is kept, so a restart does not reset it
+    daily_state_json: str = "logs/{symbol}/daily_pnl.json"
     # skip signals that follow a move on an external exchange (ext_filter:)
     ext_venue: Optional[str] = None
     ext_symbol: Optional[str] = None
@@ -309,6 +316,8 @@ _SCHEMA: Dict[str, Any] = {
         "hedge_slippage_max_bps": float,
         "miss_cooldown_after": int,
         "miss_cooldown_sec": float,
+        "daily_loss_limit_usd": float,
+        "daily_reset_tz": str,
     },
     "recorder": {
         "enabled": bool,
@@ -350,6 +359,7 @@ _SCHEMA: Dict[str, Any] = {
         "status_interval_sec": float,
         "trades_csv": str,
         "hedges_csv": str,
+        "daily_state_json": str,
         "dashboard": bool,
         "file": str,
     },
@@ -625,6 +635,18 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         except Exception:
             raise ConfigError(f"execution.pause_tz {pause_tz!r} is not a known "
                               f"time zone / 未知时区")
+    daily_loss = float(_get(raw, "execution", "daily_loss_limit_usd", 0.0))
+    if daily_loss < 0:
+        raise ConfigError("execution.daily_loss_limit_usd must be >= 0 / "
+                          "不能为负数")
+    daily_tz = str(_get(raw, "execution", "daily_reset_tz", "Asia/Shanghai"))
+    if daily_loss > 0:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(daily_tz)
+        except Exception:
+            raise ConfigError(f"execution.daily_reset_tz {daily_tz!r} is not "
+                              f"a known time zone / 未知时区")
     ext_venue = None
     if isinstance(raw.get("ext_filter"), dict):
         ext_venue = str(_get(raw, "ext_filter", "venue", "binance")).lower()
@@ -715,4 +737,9 @@ def load_config(config_file: str = "config.yaml", env_file: str = ".env", *,
         ext_max_move_bps=float(_get(raw, "ext_filter", "max_move_bps", 0.5)),
         ext_stale_ms=float(_get(raw, "ext_filter", "stale_ms", 2000.0)),
         miss_cooldown_sec=float(_get(raw, "execution", "miss_cooldown_sec", 600.0)),
+        daily_loss_limit_usd=daily_loss,
+        daily_reset_tz=daily_tz,
+        daily_state_json=_symbol_path(
+            _get(raw, "logging", "daily_state_json",
+                 "logs/{symbol}/daily_pnl.json"), symbol),
     )
